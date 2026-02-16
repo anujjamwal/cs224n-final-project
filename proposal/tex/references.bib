@@ -1,0 +1,140 @@
+@inproceedings{yang2025pencil,
+  title={PENCIL: Long Thoughts with Short Memory},
+  author={Yang, Chenxiao and Srebro, Nati and McAllester, David and Li, Zhiyuan},
+  booktitle={Proceedings of the 42nd International Conference on Machine Learning (ICML)},
+  year={2025}
+}
+@inproceedings{xia-etal-2025-tokenskip,
+    title = "{T}oken{S}kip: Controllable Chain-of-Thought Compression in {LLM}s",
+    author = "Xia, Heming  and
+      Leong, Chak Tou  and
+      Wang, Wenjie  and
+      Li, Yongqi  and
+      Li, Wenjie",
+    editor = "Christodoulopoulos, Christos  and
+      Chakraborty, Tanmoy  and
+      Rose, Carolyn  and
+      Peng, Violet",
+    booktitle = "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing",
+    month = nov,
+    year = "2025",
+    address = "Suzhou, China",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2025.emnlp-main.165/",
+    doi = "10.18653/v1/2025.emnlp-main.165",
+    pages = "3351--3363",
+    ISBN = "979-8-89176-332-6",
+    abstract = "Chain-of-Thought (CoT) has been proven effective in enhancing the reasoning capabilities of large language models (LLMs). Recent advancements, such as OpenAI{'}s o1 and DeepSeek-R1, suggest that scaling up the length of CoT sequences during inference could further boost LLM reasoning performance. However, due to the autoregressive nature of LLM decoding, longer CoT outputs lead to a linear increase in inference latency, adversely affecting user experience, particularly when the CoT exceeds 10,000 tokens. To address this limitation, we analyze the semantic importance of tokens within CoT outputs and reveal that their contributions to reasoning vary. Building on this insight, we propose TokenSkip, a simple yet effective approach that enables LLMs to selectively skip less important tokens, allowing for controllable CoT compression. Extensive experiments across various models and tasks demonstrate the effectiveness of TokenSkip in reducing CoT token usage while preserving strong reasoning performance. Notably, when applied to Qwen2.5-14B-Instruct, TokenSkip reduces reasoning tokens by 40{\%} (from 313 to 181) on GSM8K, with less than a 0.4{\%} performance drop."
+}
+@inproceedings{cui-etal-2025-stepwise,
+    title = "Stepwise Perplexity-Guided Refinement for Efficient Chain-of-Thought Reasoning in Large Language Models",
+    author = "Cui, Yingqian  and
+      He, Pengfei  and
+      Zeng, Jingying  and
+      Liu, Hui  and
+      Tang, Xianfeng  and
+      Dai, Zhenwei  and
+      Han, Yan  and
+      Luo, Chen  and
+      Huang, Jing  and
+      Li, Zhen  and
+      Wang, Suhang  and
+      Xing, Yue  and
+      Tang, Jiliang  and
+      He, Qi",
+    editor = "Che, Wanxiang  and
+      Nabende, Joyce  and
+      Shutova, Ekaterina  and
+      Pilehvar, Mohammad Taher",
+    booktitle = "Findings of the Association for Computational Linguistics: ACL 2025",
+    month = jul,
+    year = "2025",
+    address = "Vienna, Austria",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2025.findings-acl.956/",
+    doi = "10.18653/v1/2025.findings-acl.956",
+    pages = "18581--18597",
+    ISBN = "979-8-89176-256-5",
+    abstract = "Chain-of-Thought (CoT) reasoning, which breaks down complex tasks into intermediate reasoning steps, has significantly enhanced the performance of large language models (LLMs) on challenging tasks. However, the detailed reasoning process in CoT often incurs long generation times and high computational costs, partly due to the inclusion of unnecessary steps. To address this, we propose a method to identify critical reasoning steps using perplexity as a measure of their importance: a step is deemed critical if its removal causes a significant increase in perplexity. Our method enables models to focus solely on generating these critical steps. This can be achieved through two approaches: refining demonstration examples in few-shot CoT or fine-tuning the model using selected examples that include only critical steps. Comprehensive experiments validate the effectiveness of our method, which achieves a better balance between the reasoning accuracy and efficiency of CoT."
+}
+@article{zengetal2025pruning,
+  author  = {Zeng, Wenhao and Wang, Yaoning and Hu, Chao and Shi, Yuling and Wan, Chengcheng and Zhang, Hongyu and Gu, Xiaodong},
+  title   = {Pruning the Unsurprising: Efficient LLM Reasoning via First-Token Surprisal},
+  journal = {arXiv preprint arXiv:2508.05988},
+  year    = {2025},
+  url     = {https://arxiv.org/abs/2508.05988}
+}
+@misc{guo2025deepseekr1incentivizingreasoningcapability,
+      title={DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning}, 
+      author={Daya Guo and Dejian Yang and Haowei Zhang and Junxiao Song and Ruibin Yuan and Peng Sui and Yaohui Wang and Lingphei Ji and Kang Guan and Huazuo Gao and Zhenda Xie and Zeyu Sun and Xuecheng Su and Shanhuang Chen and Guanting Chen and Chao Ruan and Ming Zhang},
+      year={2025},
+      eprint={2501.12948},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2501.12948}, 
+}
+@inproceedings{li-etal-2023-compressing,
+    title = "Compressing Context to Enhance Inference Efficiency of Large Language Models",
+    author = "Li, Yucheng and Dong, Bo and Guerin, Frank and Lin, Chenghua",
+    editor = "Bouamor, Houda and Pino, Juan and Bali, Kalika",
+    booktitle = "Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing",
+    month = nov,
+    year = "2023",
+    address = "Singapore",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2023.emnlp-main.391",
+    doi = "10.18653/v1/2023.emnlp-main.391",
+    pages = "6342--6353"
+}
+@inproceedings{jiang-etal-2023-llmlingua,
+    title = "{LLML}ingua: Compressing Prompts for Accelerated Inference of Large Language Models",
+    author = "Jiang, Huiqiang and Wu, Qianhui and Lin, Chin-Yew and Yang, Yuqing and Qiu, Lili",
+    editor = "Bouamor, Houda and Pino, Juan and Bali, Kalika",
+    booktitle = "Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing",
+    month = nov,
+    year = "2023",
+    address = "Singapore",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2023.emnlp-main.825",
+    doi = "10.18653/v1/2023.emnlp-main.825",
+    pages = "13358--13376"
+}
+@article{shi2025longcodezip,
+    title={LongCodeZip: Compress Long Context for Code Language Models},
+    author={Shi, Yuling and Qian, Yichun and Zhang, Hongyu and Shen, Beijun and Gu, Xiaodong},
+    journal={arXiv preprint arXiv:2510.00446},
+    year={2025},
+    url={https://arxiv.org/abs/2510.00446}
+}
+@inproceedings{xia2025tokenskip,
+    title = "{T}oken{S}kip: Controllable Chain-of-Thought Compression in {LLM}s",
+    author = "Xia, Heming and Leong, Chak Tou and Wang, Wenjie and Li, Yongqi and Li, Wenjie",
+    editor = "Christodoulopoulos, Christos and Chakraborty, Tanmoy and Rose, Carolyn and Peng, Violet",
+    booktitle = "Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing",
+    month = nov,
+    year = "2025",
+    address = "Suzhou, China",
+    publisher = "Association for Computational Linguistics",
+    pages = "3351--3363"
+}
+@misc{moshkov2025aimo2winningsolutionbuilding,
+      title={AIMO-2 Winning Solution: Building State-of-the-Art Mathematical Reasoning Models with OpenMathReasoning dataset}, 
+      author={Ivan Moshkov and Darragh Hanley and Ivan Sorokin and Shubham Toshniwal and Christof Henkel and Benedikt Schifferer and Wei Du and Igor Gitman},
+      year={2025},
+      eprint={2504.16891},
+      archivePrefix={arXiv},
+      primaryClass={cs.AI},
+      url={https://arxiv.org/abs/2504.16891}, 
+}
+@misc{ai-mathematical-olympiad-progress-prize-2,
+    author = {Simon Frieder and Sam Bealing and Arsenii Nikolaiev and Geoff C. Smith and Kevin Buzzard and Timothy Gowers and Peter J. Liu and Po-Shen Loh and Lester Mackey and Leonardo de Moura and Dan Roberts and D. Sculley and Terence Tao and David Balduzzi and Simon Coyle and Alex Gerko and Ryan Holbrook and Addison Howard and XTX Markets},
+    title = {AI Mathematical Olympiad - Progress Prize 2},
+    year = {2024},
+    howpublished = {\url{https://kaggle.com/competitions/ai-mathematical-olympiad-progress-prize-2}},
+    note = {Kaggle}
+}
+@misc{aime24,
+      title={American Invitational Mathematics Examination (AIME) 2024}, 
+      author={Zhang, Yifan and Math-AI, Team},
+      year={2024},
+}

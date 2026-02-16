@@ -1,0 +1,171 @@
+\documentclass{article}
+
+% If you are using the NeurIPS style file, ensure it is in your directory.
+% If not, you might need to comment this out or use a standard package like 'geometry'.
+\usepackage[final]{neurips_2019}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{booktabs}
+\usepackage{amsfonts}
+\usepackage{nicefrac}
+\usepackage{microtype}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{lipsum}
+
+\newcommand{\note}[1]{\textcolor{blue}{{#1}}}
+
+\title{
+  Cognitive Compression: Recursive Note-Taking for Efficient Chain-of-Thought in LLMs \\
+  \vspace{1em}
+  \small{\normalfont Stanford CS224N Custom Project}
+}
+
+\author{
+  Anuj Jamwal \\
+  Department of Computer Science \\
+  Stanford University \\
+  \texttt{anujjam@stanford.edu}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+  Chain-of-Thought (CoT) prompting has unlocked significant reasoning capabilities in Large Language Models (LLMs) but incurs a linear growth in context memory and compute costs. Existing efficiency methods, such as PENCIL, address this by aggressively deleting intermediate reasoning steps, which prevents the model from backtracking or referencing prior partial results. We propose "Cognitive Compression," a method that fine-tunes Small Language Models (SLMs) to recursively summarize completed reasoning steps into concise natural language "notes" rather than deleting them. This approach aims to reduce token consumption and KV-cache usage while preserving the logical state required for complex problem-solving. We will evaluate this method on the GSM8K and AIME24 benchmarks, measuring both accuracy and token efficiency.
+\end{abstract}
+
+\section{Key Information to include}
+
+\begin{itemize}
+    \item External collaborators (if you have any): None
+    \item Mentor (custom project only): [Insert Mentor Name if known, or leave blank]
+    \item Sharing project: No
+\end{itemize}
+
+
+\section{Research paper summary (max 2 pages)}
+\newcommand{\call}{\texttt{[CALL]}}
+\newcommand{\sep}{\texttt{[SEP]}}
+\newcommand{\return}{\texttt{[RETURN]}}
+
+\begin{table}[h]
+    \centering
+    \begin{tabular}{ll}
+        \toprule
+        \textbf{Title} & PENCIL: Long Thoughts with Short Memory \\
+        \midrule
+        \textbf{Venue} & International Conference on Machine Learning (ICML) \\
+        \textbf{Year}  & 2025 \\
+        \textbf{URL}   & \url{https://arxiv.org/pdf/2503.14337} \\
+        \bottomrule
+    \end{tabular}
+    \vspace{1em}
+    \caption{Sample table for bibliographical information~\cite{yang2025pencil}.}
+\end{table}
+
+\paragraph{Background.}
+Large Reasoning models have demonstrated emergent capabilities in complex domains like mathematics, programming, and logical reasoning by scaling up the length of Chain-of-Thought (CoT). This scaling, however, comes at a prohibitive cost: reasoning spans thousands of tokens, leading to memory overhead and substantial latency. Crucially, these lengthy traces often contain logical redundancy, such as over-explaining simple problems or superficially exploring multiple paths. There are at times branches that are explored but subsequently rejected, yet continue to linger in the CoT, processed repeatedly by the LLM. Prior work on context compression includes token-level methods like TokenSkip (Xia et al., 2025)~\cite{xia-etal-2025-tokenskip}, step-level pruning like SPIRIT (Cui et al., 2025)~\cite{cui-etal-2025-stepwise}, and anchor guider pruning like ASAP (Zeng et al., 2026)~\cite{zengetal2025pruning}.
+
+\paragraph{Summary of contributions.}
+The paper introduces PENCIL, which incorporates a novel reduction mechanism into the autoregressive generation process that recursively cleans up intermediate thoughts based on patterns learned during training. While the methods mentioned in the background focus on training the model to produce compressed CoT initially, PENCIL acknowledges that verbose reasoning is sometimes necessary to solve a sub-problem. By iteratively generating and erasing thoughts as part of the autoregressive loop at inference time, PENCIL can "think deeper" to solve harder problems using shorter context and less compute.
+
+More concretely, the paper focuses on a simple yet universal reduction rule motivated by the function call stack in modern computers:
+
+\begin{equation}
+    \textbf{C} ~\call~ \textbf{T} ~\sep~ \textbf{A} ~\return ~~\Rightarrow~~
+\textbf{C}~\textbf{A}
+\end{equation}
+
+where $\call$, $\sep$, and $\return$ are special tokens that separate the context ($\textbf{C}$), thoughts ($\textbf{T}$), and answer ($\textbf{A}$) in the sequence. Once a computation completes (marked by $\return$), all intermediate reasoning steps (those between $\call$ and $\sep$) are removed, merging the answer back into the context. Importantly, this process can be applied recursively, allowing for hierarchical reasoning structures similar to nested function calls.
+
+Using PENCIL, the authors demonstrated that a small 25M parameter transformer with a 2048 context length could solve Einstein's puzzle—a task that challenges much larger models like GPT-4.
+
+\paragraph{Limitations and discussion.}
+First, the model is trained and evaluated on SAT, QBF, and Einstein’s puzzle, all of which require long chain following but are distinct from the complex numerical reasoning found in mathematics or coding. Whether the methodology generalizes to these domains is left unexplored.
+
+Second, the compression mechanism is effectively a deletion of the context fragment. While this works when the model is correct in its chosen branch of reasoning, there is little to no context left for future reference. If the chosen line of reasoning proves wrong, the model cannot backtrack, as that part of the "memory" has been erased.
+
+\paragraph{Why this paper?}
+While techniques like KV-caching and sparse attention address architectural efficiency, PENCIL is unique in addressing \textit{logical} efficiency at the token generation level. Unlike standard context compression (e.g., LLMLingua~\cite{jiang-etal-2023-llmlingua}) which filters tokens post-hoc, or summary-tokens (e.g., recurrent models), PENCIL introduces a mechanism to modify the history during generation. However, we argue that PENCIL's "delete-only" approach is too aggressive for complex math, motivating our "compress/note-taking" approach.
+
+\paragraph{Wider research context.}
+This work addresses the challenges posed by long Chain-of-Thought and long context windows. Long context suffers from two broad categories of redundancies:
+\begin{enumerate}
+    \item \textbf{Structural Redundancy:} Digressive branches that are no longer relevant.
+    \item \textbf{Logical Redundancy:} Explaining trivial actions or repeating established facts.
+\end{enumerate}
+
+The area of context compression is active. Approaches like Selective Context (Li et al., 2023)~\cite{li-etal-2023-compressing}, LLMLingua (Jiang et al., 2023)~\cite{jiang-etal-2023-llmlingua}, and CodeZip (Shi et al., 2025)~\cite{shi2025longcodezip} employ information-theoretic metrics or external models to filter tokens. Other efforts focus on efficient reasoning, training models to produce naturally efficient chains, such as TokenSkip (Xia et al., 2025)~\cite{xia-etal-2025-tokenskip} or ASAP (Zeng et al., 2026)~\cite{zengetal2025pruning}.
+
+\newpage
+\section{Project description (1-2 pages)}
+
+\paragraph{Goal.}
+Current Chain-of-Thought (CoT) methods treat reasoning as an append-only log, leading to linear memory growth. PENCIL addresses this by deleting past thoughts, but this prevents the model from backtracking or referencing prior intermediate results. Our goal is to train a model to perform "Iterative Note-Taking": converting verbose reasoning blocks into concise state representations (notes) dynamically during generation. This shrinks the context window while preserving the logical "state" of the solution.
+
+We also identify the following stretch goals:
+\begin{enumerate}
+    \item Analyze the emergence of stronger reasoning capabilities compared to the baseline model.
+    \item Empower the model with the ability to "course correct" over compressed CoT. We will explore training the model to retrieve specific segments of the previous chain of thought, allowing it to review past actions without permanently exploding the context.
+    \item Expand training and evaluate performance on the AIMO-2 Kaggle dataset~\cite{ai-mathematical-olympiad-progress-prize-2}.
+\end{enumerate}
+
+\paragraph{Task.}
+We will fine-tune a Small Language Model (SLM), such as Qwen-2.5-Math-1.5B or 7B. The model will be trained to:
+\begin{enumerate}
+    \item Recognize when a reasoning step is complete.
+    \item Generate a compressed "note" of that step.
+    \item Discard the raw tokens of the step from its context, retaining only the note in the context.
+    \item Continue reasoning based on the note.
+\end{enumerate}
+
+We will measure the performance of the model on its ability to successfully solve the problems with a reduction is token count.
+
+\paragraph{Data.}
+We will use the OpenMathReasoning~\cite{moshkov2025aimo2winningsolutionbuilding} dataset from nvidia available on Hugging Face. OpenMathReasoning is a large-scale math reasoning dataset containing step-by-step solutions for about 306K unique mathematical problems.
+
+To prepare the dataset, we will select a subset of problems with long CoTs and use a Large LLM (e.g., GPT-4o or DeepSeek-V3) to annotate the data. We will prompt the teacher model to identify logical break-points in the chain of thought and generate a concise 'memory summary' of the preceding steps. We aim to process approximately 1,000 to 2,000 examples to ensure sufficient diversity for the fine-tuning process.
+
+\paragraph{Methods.}
+We will employ a Teacher-Student distillation approach:
+\begin{itemize}
+    \item \textbf{Data Synthesis:} As described above, we will generate a parallel dataset where verbose reasoning steps are replaced by summary tokens using a teacher model.
+    \item \textbf{Training:} We will fine-tune the student model on this augmented dataset to learn the distribution $P(Summary | Context, Reasoning)$ and $P(NextStep | Context, Summary)$. This finetuning is similar to other CoT training and only differs in the training data.
+    \item \textbf{Inference:} We will implement a custom generation loop that will detect the completion of a summary phase and physically remove the preceding verbose tokens from memory, retaining only the summary.
+\end{itemize}
+
+\paragraph{Baselines.}
+We will establish a baseline by executing the original model on the selected problems. The baseline will capture:
+\begin{enumerate}
+    \item Token Count (Total tokens processed)
+    \item Outcome Accuracy (Correct/Wrong)
+    \item Peak Memory Usage (to demonstrate efficiency gains)
+\end{enumerate}
+
+We will also capture these metrics for the evaluation benchmarks (proposed below) to draw a baseline.
+
+\paragraph{Evaluation.}
+We will evaluate on \textbf{GSM8K} (to ensure that basic reasoning is retained) and \textbf{AIME24} (to test complex long-context handling).
+\begin{itemize}
+    \item \textbf{Primary Metric:} Accuracy (\%) compared to baseline.
+    \item \textbf{Efficiency Metric:} Average Tokens Processed and KV Cache reduction.
+\end{itemize}
+
+\paragraph{Ethical Implications.}
+The primary ethical risk in compressing reasoning chains is the potential for \textit{loss of nuance} and \textit{hallucinated summaries}. If the model learns to compress context aggressively, it may summarize away critical safety constraints or edge cases present in the original prompt, leading to unsafe outputs that appear logically sound but ignore initial instructions. Furthermore, "note-taking" models obfuscate the reasoning process; unlike full CoT, where a user can verify every step, a compressed state is a "black box" of the model's internal memory. This lack of interpretability makes it harder for humans to audit why a model made a specific decision. 
+
+In order to mitigate this, we propose the following options
+\begin{enumerate}
+    \item The client can retain the CoT and log operations which can be presented to the human on demand
+    \item Monitoring the semantic similarity between the full CoT and the compressed notes to ensure fidelity is maintained.
+\end{enumerate}
+
+\bibliographystyle{unsrt}
+\bibliography{references}
+
+\end{document}
