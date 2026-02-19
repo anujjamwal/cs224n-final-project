@@ -30,7 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 SOURCE_REPO = "davidanugraha/OpenMathReasoning-Sampled"
-HF_REPO = "anujjamwal/davidanugraha/OpenMathReasoning-Hierarchical-Cot"
+HF_REPO = "anujjamwal/OpenMathReasoning-Sampled-Hierarchical-Cot"
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,7 @@ def load_source_slice(offset, limit):
     logger.info(
         "Loading source records [%d, %d) from %s", offset, offset + limit, SOURCE_REPO
     )
-    ds = load_dataset(SOURCE_REPO, data_files="data/cot-*", split="train", streaming=True)
+    ds = load_dataset(SOURCE_REPO, split="train", streaming=True)
     records = list(ds.skip(offset).take(limit))
     logger.info("Loaded %d source records", len(records))
     return Dataset.from_list(records)
@@ -115,12 +115,12 @@ def process_with_api(examples, model):
 
     def _segment(x):
         try:
-            x["hierarchical_cot"] = segment.segment_chain_of_thought_with_claude(
+            x["hierarchical_cot"], x["hierarchical_cot_raw"] = segment.segment_chain_of_thought_with_claude(
                 x["problem"], x["generated_solution"], x["expected_answer"]
             )
         except Exception as e:
             logger.error("Failed to segment problem %r: %s", x["problem"][:80], e)
-            x["hierarchical_cot"] = ""
+            x["hierarchical_cot"], x["hierarchical_cot_raw"] = "", ""
         return x
 
     return examples.map(_segment, num_proc=1)
@@ -129,7 +129,7 @@ def process_with_api(examples, model):
 def process_with_cli(examples, model, parallelism):
     raw = [
         {
-            "problem_statement": ex["problem"],
+            "problem_statement": ex["question"],
             "chain_of_thought": ex["generated_solution"],
             "final_solution": ex["expected_answer"],
         }
@@ -138,8 +138,7 @@ def process_with_cli(examples, model, parallelism):
     results = segment.process_examples_parallel(raw, parallelism=parallelism, model=model)
 
     def _attach(x, idx):
-        result = results[idx]
-        x["hierarchical_cot"] = result if isinstance(result, str) else ""
+        x["hierarchical_cot"], x["hierarchical_cot_raw"] = results[idx]
         return x
 
     return examples.map(_attach, with_indices=True, num_proc=1)
@@ -154,7 +153,7 @@ def main():
     args = parse_args()
 
     source = load_source_slice(args.offset, args.limit)
-    source_problems = set(source["problem"])
+    source_problems = set(source["question"])
 
     existing = None
     if args.mode == "append":

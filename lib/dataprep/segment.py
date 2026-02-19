@@ -5,10 +5,11 @@ import subprocess
 import time
 import concurrent.futures
 import tenacity
+import re
 
 logger = logging.getLogger(__name__)
 
-CLAUDE_PROMPT = """You are a research assistant that is helping me prepare a dataset for training a new king of reasoning LLM.
+CLAUDE_PROMPT = """You are a research assistant that is helping me prepare a dataset for training a new kind of reasoning LLM.
 
 ## Background
 Let me give you some background on my research. Traditionally, CoT are treated as long append-only structure which keeps growing
@@ -85,9 +86,20 @@ Follow these strict rules:
 into chain of thoughts for the subproblems.
 3. Do not add headings or any other text that is not present in the original chain of thought. The only addition you can make is
 to add the special tokens and to the solution section if the original chain of thought doesn't have a clear wording for it.
+4. Ensure the final solution has the solution in the format requested in the prompt template. This will be in the last few lines.
+
+At the end produce a summary of the steps and verify that the generated hierarchical cot is valid.
+
+## Output Format
+
+Output the produced hierarchical COT wrapped in <hierarchical-cot> </hierarchical-cot> tags.
 """
 CLAUDE_INPUT="""
 ## Inputs
+
+### Prompt Template
+
+Solve the following math problem. Make sure to put the answer (and only answer) inside \\boxed{{}}.\\n\\n{{problem}}
 
 ### Problem Statement
 
@@ -112,8 +124,13 @@ def segment_chain_of_thought_with_claude(problem_statement, chain_of_thought, fi
         chain_of_thought=chain_of_thought,
         final_solution=final_solution,
     )
-    segmented_chain_of_thought = call_llm(prompt)
-    return segmented_chain_of_thought
+    result = call_llm(prompt)
+    match = re.search(r'<hierarchical-cot>(.*?)</hierarchical-cot>', result, re.DOTALL)
+    if match:
+        hierarchical_cot = match.group(1).strip()
+    else:
+        hierarchical_cot = result
+    return hierarchical_cot, result
 
 @tenacity.retry(retry=tenacity.retry_if_exception(anthropic.RateLimitError),
                 wait=tenacity.wait_exponential_jitter(),
@@ -234,7 +251,15 @@ def segment_chain_of_thought_with_claude_cli(problem_statement, chain_of_thought
         chain_of_thought=chain_of_thought,
         final_solution=final_solution,
     )
-    return call_llm_cli(prompt, model=model, output_file=output_file)
+    
+    result = call_llm_cli(prompt, model=model, output_file=output_file)
+    match = re.search(r'<hierarchical-cot>(.*?)</hierarchical-cot>', result, re.DOTALL)
+    if match:
+        hierarchical_cot = match.group(1).strip()
+    else:
+        hierarchical_cot = result
+    return hierarchical_cot, result
+
 
 
 CLI_OUTPUT_DIR = os.environ.get("CLI_OUTPUT_DIR", "cli_outputs")
@@ -258,6 +283,14 @@ def process_examples_parallel(examples, parallelism=DEFAULT_PARALLELISM, model=N
 
     def _process(idx, example):
         output_file = os.path.join(CLI_OUTPUT_DIR, f"example_{idx}.txt")
+
+        if output_file and os.path.exists(output_file):
+            with open(output_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    logger.info(f"Found content for {idx} in {output_file}. Skipping model invocation")
+                    return idx, content
+
         try:
             output = segment_chain_of_thought_with_claude_cli(
                 problem_statement=example["problem_statement"],
