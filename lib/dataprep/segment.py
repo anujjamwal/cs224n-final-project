@@ -125,12 +125,7 @@ def segment_chain_of_thought_with_claude(problem_statement, chain_of_thought, fi
         final_solution=final_solution,
     )
     result = call_llm(prompt)
-    match = re.search(r'<hierarchical-cot>(.*?)</hierarchical-cot>', result, re.DOTALL)
-    if match:
-        hierarchical_cot = match.group(1).strip()
-    else:
-        hierarchical_cot = result
-    return hierarchical_cot, result
+    return parse_result(result)
 
 @tenacity.retry(retry=tenacity.retry_if_exception(anthropic.RateLimitError),
                 wait=tenacity.wait_exponential_jitter(),
@@ -253,13 +248,16 @@ def segment_chain_of_thought_with_claude_cli(problem_statement, chain_of_thought
     )
     
     result = call_llm_cli(prompt, model=model, output_file=output_file)
+    return result
+
+
+def parse_result(result):
     match = re.search(r'<hierarchical-cot>(.*?)</hierarchical-cot>', result, re.DOTALL)
     if match:
         hierarchical_cot = match.group(1).strip()
     else:
         hierarchical_cot = result
     return hierarchical_cot, result
-
 
 
 CLI_OUTPUT_DIR = os.environ.get("CLI_OUTPUT_DIR", "cli_outputs")
@@ -289,9 +287,13 @@ def process_examples_parallel(examples, parallelism=DEFAULT_PARALLELISM, model=N
                 content = f.read().strip()
                 if content:
                     logger.info(f"Found content for {idx} in {output_file}. Skipping model invocation")
-                    return idx, content
+                    return idx, parse_result(content)
+                else:
+                    logger.warn(f"Found empty content for {idx} in {output_file}. Skipping model invocation")
+                    return idx, ("", "")
 
         try:
+            logger.info("Running CLI for examples %d", idx)
             output = segment_chain_of_thought_with_claude_cli(
                 problem_statement=example["problem_statement"],
                 chain_of_thought=example["chain_of_thought"],
@@ -299,7 +301,7 @@ def process_examples_parallel(examples, parallelism=DEFAULT_PARALLELISM, model=N
                 model=model,
                 output_file=output_file,
             )
-            return idx, output
+            return idx, parse_result(output)
         except Exception as e:
             logger.error("Failed to process example %d: %s", idx, e)
             return idx, e

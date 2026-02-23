@@ -38,6 +38,7 @@ def generate(
         if solution_idx is None:
             return seq
 
+        print(f"Pruning COT on {thought_idx} - {solution_idx}")
         return seq[:thought_idx] + seq[solution_idx:]
 
     batch_size = input_ids.shape[0]
@@ -63,6 +64,7 @@ def generate(
         # Prune CoT per batch element that generated [RETURN]
         return_mask = next_tokens.squeeze(-1) == return_token_id
         if return_mask.any():
+            print("FOUND token initiate prune")
             token_lists = [tokens[b].tolist() for b in range(batch_size)]
             for b in range(batch_size):
                 if return_mask[b]:

@@ -110,10 +110,11 @@ def load_existing():
 # Processing
 # ---------------------------------------------------------------------------
 
-def process_with_api(examples, model):
+def process_with_api(examples, model, parallelism):
     os.environ["MODEL"] = model
 
     def _segment(x):
+        x["hcot_model"] = model
         try:
             x["hierarchical_cot"], x["hierarchical_cot_raw"] = segment.segment_chain_of_thought_with_claude(
                 x["problem"], x["generated_solution"], x["expected_answer"]
@@ -123,7 +124,7 @@ def process_with_api(examples, model):
             x["hierarchical_cot"], x["hierarchical_cot_raw"] = "", ""
         return x
 
-    return examples.map(_segment, num_proc=1)
+    return examples.map(_segment, num_proc=parallelism)
 
 
 def process_with_cli(examples, model, parallelism):
@@ -139,6 +140,7 @@ def process_with_cli(examples, model, parallelism):
 
     def _attach(x, idx):
         x["hierarchical_cot"], x["hierarchical_cot_raw"] = results[idx]
+        x["hcot_model"] = model
         return x
 
     return examples.map(_attach, with_indices=True, num_proc=1)
@@ -180,7 +182,7 @@ def main():
     else:
         logger.info("Processing %d records via %s", len(to_process), args.method)
         if args.method == "api":
-            newly_processed = process_with_api(to_process, args.model)
+            newly_processed = process_with_api(to_process, args.model, args.parallelism)
         else:
             newly_processed = process_with_cli(to_process, args.model, args.parallelism)
 
