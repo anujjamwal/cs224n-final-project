@@ -5,7 +5,7 @@ import torch
 from dataclasses import dataclass
 from transformers import LogitsProcessorList, StoppingCriteriaList
 
-from .generate import generate
+from .generate import generate, generate_with_mask
 
 # ---------------------------------------------------------------------------
 # Token IDs used throughout tests
@@ -80,6 +80,7 @@ def _run(script_tokens, prompt, max_length, batch_size=1):
     script = [torch.tensor(step) for step in script_tokens]
     model = ScriptedModel(script)
     input_ids = torch.tensor(prompt, dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
     return generate(
         model=model,
         input_ids=input_ids,
@@ -89,6 +90,7 @@ def _run(script_tokens, prompt, max_length, batch_size=1):
         solution_token_id=SOLUTION_ID,
         thought_token_id=THOUGHT_ID,
         eos_token_id=EOS_ID,
+        attention_mask=attention_mask,
     )
 
 
@@ -230,6 +232,7 @@ class TestLogitsProcessor:
         input_ids = torch.tensor([[1, 2]], dtype=torch.long)
 
         processor_list = LogitsProcessorList([_TrackingProcessor()])
+        attention_mask = torch.ones_like(input_ids)
         generate(
             model=model,
             input_ids=input_ids,
@@ -239,6 +242,148 @@ class TestLogitsProcessor:
             solution_token_id=SOLUTION_ID,
             thought_token_id=THOUGHT_ID,
             eos_token_id=EOS_ID,
+            attention_mask=attention_mask,
         )
         # Step 0: prompt len 2, step 1: prompt + 1 generated = 3
         assert seen_lengths == [2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Helpers for generate_with_mask
+# ---------------------------------------------------------------------------
+
+
+def _run_masked(script_tokens, prompt, max_length, min_token_size, batch_size=1):
+    """Helper that sets up fakes and calls generate_with_mask."""
+    script = [torch.tensor(step) for step in script_tokens]
+    model = ScriptedModel(script)
+    input_ids = torch.tensor(prompt, dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+    return generate_with_mask(
+        model=model,
+        input_ids=input_ids,
+        logits_processor=_identity_processor(),
+        stopping_criteria=_stopping(max_length),
+        return_token_id=RETURN_ID,
+        solution_token_id=SOLUTION_ID,
+        thought_token_id=THOUGHT_ID,
+        eos_token_id=EOS_ID,
+        min_token_size=min_token_size,
+        attention_mask=attention_mask,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tests for generate_with_mask
+# ---------------------------------------------------------------------------
+
+
+class TestMaskBelowThreshold:
+    def test_no_prune_below_min_token_size(self):
+        """Below min_token_size, tokens should NOT be pruned (all kept)."""
+        # Prompt [1], generates: THOUGHT, 10, 11, SOLUTION, 20, RETURN, EOS
+        # Total after RETURN: 7 tokens.  Set min_token_size=100 so we never prune.
+        result = _run_masked(
+            script_tokens=[
+                [THOUGHT_ID], [10], [11], [SOLUTION_ID], [20], [RETURN_ID], [EOS_ID],
+            ],
+            prompt=[[1]],
+            max_length=100,
+            min_token_size=100,
+        )
+        tokens = result[0].tolist()
+        # All tokens should still be present (masked, not pruned)
+        assert THOUGHT_ID in tokens
+        assert 10 in tokens
+        assert 11 in tokens
+        assert SOLUTION_ID in tokens
+        assert 20 in tokens
+        assert RETURN_ID in tokens
+
+    def test_4d_mask_passed_to_model(self):
+        """After a block completes below threshold, model receives a 4-D mask."""
+        received_masks = []
+
+        class MaskCapturingModel:
+            def __init__(self, script, vocab_size=200):
+                self._inner = ScriptedModel(script, vocab_size)
+
+            def __call__(self, input_ids, **kwargs):
+                received_masks.append(kwargs.get('attention_mask'))
+                return self._inner(input_ids, **kwargs)
+
+        # Prompt [1], generates: THOUGHT, SOLUTION, RETURN, 30, EOS
+        script = [
+            torch.tensor([THOUGHT_ID]),
+            torch.tensor([SOLUTION_ID]),
+            torch.tensor([RETURN_ID]),
+            torch.tensor([30]),
+            torch.tensor([EOS_ID]),
+        ]
+        model = MaskCapturingModel(script)
+        input_ids = torch.tensor([[1]], dtype=torch.long)
+        attention_mask = torch.ones_like(input_ids)
+        generate_with_mask(
+            model=model,
+            input_ids=input_ids,
+            logits_processor=_identity_processor(),
+            stopping_criteria=_stopping(100),
+            return_token_id=RETURN_ID,
+            solution_token_id=SOLUTION_ID,
+            thought_token_id=THOUGHT_ID,
+            eos_token_id=EOS_ID,
+            min_token_size=100,
+            attention_mask=attention_mask,
+        )
+        # Steps 0-2 (generating THOUGHT, SOLUTION, RETURN): no completed block yet → 2-D mask
+        # Steps 3-4 (generating 30, EOS): block is completed → 4-D mask
+        assert received_masks[0].dim() == 2  # before block completes
+        assert received_masks[3].dim() == 4  # after block completes
+        assert received_masks[4].dim() == 4
+
+
+class TestPruneAboveThreshold:
+    def test_prune_above_min_token_size(self):
+        """Above min_token_size, completed blocks should be pruned."""
+        # Prompt [1], generates: THOUGHT, 10, SOLUTION, 20, RETURN, EOS
+        # Total after RETURN: 6 tokens.  Set min_token_size=1 so we always prune.
+        result = _run_masked(
+            script_tokens=[
+                [THOUGHT_ID], [10], [SOLUTION_ID], [20], [RETURN_ID], [EOS_ID],
+            ],
+            prompt=[[1]],
+            max_length=100,
+            min_token_size=1,
+        )
+        tokens = result[0].tolist()
+        # Thought span pruned, solution kept
+        assert THOUGHT_ID not in tokens
+        assert 10 not in tokens
+        assert SOLUTION_ID in tokens
+        assert 20 in tokens
+
+    def test_mask_then_prune(self):
+        """First block masked (below threshold), second block pruned (above)."""
+        # Prompt is 1 token. min_token_size=8.
+        # Block 1: THOUGHT, 10, SOLUTION, 20, RETURN  (seq reaches 6 tokens → below 8 → mask)
+        # Then: 30 (seq=7), then block 2 starts:
+        # THOUGHT, 11, SOLUTION, 21, RETURN  (seq reaches 12 → above 8 → prune)
+        # Then: EOS
+        result = _run_masked(
+            script_tokens=[
+                [THOUGHT_ID], [10], [SOLUTION_ID], [20], [RETURN_ID],  # block 1 (masked)
+                [30],
+                [THOUGHT_ID], [11], [SOLUTION_ID], [21], [RETURN_ID],  # block 2 (pruned)
+                [EOS_ID],
+            ],
+            prompt=[[1]],
+            max_length=100,
+            min_token_size=8,
+        )
+        tokens = result[0].tolist()
+        # Block 1 should still be in the sequence (masked, not pruned)
+        assert 10 in tokens
+        # Block 2's thought span should be pruned
+        assert 11 not in tokens
+        # Block 2's solution should be kept
+        assert 21 in tokens
