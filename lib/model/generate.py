@@ -13,36 +13,12 @@ def generate(
     eos_token_id,
     **model_kwargs
 ):
-    def _prune_cot_single(seq):
-        """Prune the most recently completed [THOUGHT]...[SOLUTION]...[RETURN] block.
-
-        Uses stack-based matching (consistent with extract_cot_blocks in masks.py)
-        to correctly handle nested CoT structures. Only prunes the block closed
-        by the trailing [RETURN] token (the last token in seq).
-        """
-        # Stack-based scan to find all complete blocks
-        stack = []  # entries: [thought_pos, solution_pos]
-        blocks = []  # complete (thought_pos, solution_pos, return_pos) triplets
-        for i, tok in enumerate(seq):
-            if tok == thought_token_id:
-                stack.append([i, None])
-            elif tok == solution_token_id and stack:
-                stack[-1][1] = i
-            elif tok == return_token_id and stack:
-                thought_pos, solution_pos = stack.pop()
-                if solution_pos is not None:
-                    blocks.append((thought_pos, solution_pos, i))
-
-        if not blocks:
-            return seq
-
-        # Prune the last completed block (the one just closed by the trailing [RETURN])
-        thought_idx, solution_idx, _ = blocks[-1]
-        print(f"Pruning COT on {thought_idx} - {solution_idx}")
-        return seq[:thought_idx] + seq[solution_idx:]
-
     batch_size = input_ids.shape[0]
     tokens = input_ids.clone()
+
+    # Track sub thoughts – one stack per batch element
+    stacks = [[] for _ in range(batch_size)]
+
     # Track which batch elements are still generating
     attention_mask = model_kwargs.pop('attention_mask')
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
@@ -65,27 +41,39 @@ def generate(
         # Honour all stopping criteria (e.g. MaxTimeCriteria, custom callbacks)
         if stopping_criteria(tokens, next_token_logits).all():
             break
+        
+        sq = next_tokens.squeeze(-1)
+        pos = tokens.shape[1] - 1  # index of the just-appended token
+
+        # Track [THOUGHT] and [SOLUTION] tokens — sparse iteration over active elements only
+        for b in (sq == thought_token_id).nonzero(as_tuple=True)[0].tolist():
+            stacks[b].append([pos, None])
+
+        for b in (sq == solution_token_id).nonzero(as_tuple=True)[0].tolist():
+            if stacks[b]:
+                stacks[b][-1][1] = pos
 
         # Prune CoT per batch element that generated [RETURN]
-        return_mask = next_tokens.squeeze(-1) == return_token_id
-        if return_mask.any():
-            print("FOUND token initiate prune")
-            token_lists = [tokens[b].tolist() for b in range(batch_size)]
+        return_indices = (sq == return_token_id).nonzero(as_tuple=True)[0].tolist()
+        if return_indices:
+            new_rows = []
+            pruned_any = False
             for b in range(batch_size):
-                if return_mask[b]:
-                    token_lists[b] = _prune_cot_single(token_lists[b])
+                if b in return_indices and stacks[b]:
+                    thought_pos, solution_pos = stacks[b].pop()
+                    if solution_pos is not None:
+                        new_rows.append(torch.cat((tokens[b, :thought_pos], tokens[b, solution_pos:])))
+                        pruned_any = True
+                        continue
+                new_rows.append(tokens[b])
 
-            # Pad to equal length and rebuild tensors
-            max_len = max(len(s) for s in token_lists)
-            padded = []
-            new_mask = []
-            for s in token_lists:
-                pad_len = max_len - len(s)
-                padded.append(s + [eos_token_id] * pad_len)
-                new_mask.append([1] * len(s) + [0] * pad_len)
-
-            tokens = torch.tensor(padded, dtype=tokens.dtype, device=tokens.device)
-            attention_mask = torch.tensor(new_mask, dtype=attention_mask.dtype, device=attention_mask.device)
+            if pruned_any:
+                max_len = max(r.shape[0] for r in new_rows)
+                tokens = torch.full((batch_size, max_len), eos_token_id, dtype=tokens.dtype, device=tokens.device)
+                attention_mask = torch.zeros((batch_size, max_len), dtype=attention_mask.dtype, device=attention_mask.device)
+                for b, r in enumerate(new_rows):
+                    tokens[b, :r.shape[0]] = r
+                    attention_mask[b, :r.shape[0]] = 1
   
     return tokens
 
@@ -109,23 +97,6 @@ def generate_with_mask(
     mask (identical to MaterialisedMaskMixin) instead of being pruned away.
     Once the sequence is long enough, new blocks are pruned as in ``generate``.
     """
-
-    def _prune_cot_single(seq):
-        stack = []
-        blocks = []
-        for i, tok in enumerate(seq):
-            if tok == thought_token_id:
-                stack.append([i, None])
-            elif tok == solution_token_id and stack:
-                stack[-1][1] = i
-            elif tok == return_token_id and stack:
-                thought_pos, solution_pos = stack.pop()
-                if solution_pos is not None:
-                    blocks.append((thought_pos, solution_pos, i))
-        if not blocks:
-            return seq
-        thought_idx, solution_idx, _ = blocks[-1]
-        return seq[:thought_idx] + seq[solution_idx:]
 
     def _build_4d_mask(tokens_tensor, padding_mask_1d):
         """Build a 4-D float attention mask with hierarchical CoT blocking."""
@@ -159,6 +130,7 @@ def generate_with_mask(
     padding_mask = model_kwargs.pop('attention_mask')
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
     has_active_blocks = False
+    stacks = [[] for _ in range(batch_size)]
     max_token_length = model_kwargs.get("max_new_tokens", stopping_criteria[0].max_length)
 
     while tokens.shape[1] < max_token_length:
@@ -184,34 +156,48 @@ def generate_with_mask(
         if stopping_criteria(tokens, next_token_logits).all():
             break
 
+        sq = next_tokens.squeeze(-1)
+        pos = tokens.shape[1] - 1  # index of the just-appended token
+
+        # Track [THOUGHT] and [SOLUTION] tokens — sparse iteration over active elements only
+        for b in (sq == thought_token_id).nonzero(as_tuple=True)[0].tolist():
+            stacks[b].append([pos, None])
+
+        for b in (sq == solution_token_id).nonzero(as_tuple=True)[0].tolist():
+            if stacks[b]:
+                stacks[b][-1][1] = pos
+
         # Handle [RETURN] token
-        return_mask = next_tokens.squeeze(-1) == return_token_id
-        if return_mask.any():
+        return_indices = (sq == return_token_id).nonzero(as_tuple=True)[0].tolist()
+        if return_indices:
             if tokens.shape[1] < min_token_length:
                 # Below threshold: mask the block instead of pruning
                 has_active_blocks = True
             else:
                 # Above threshold: prune the block
-                token_lists = [tokens[b].tolist() for b in range(batch_size)]
+                new_rows = []
+                pruned_any = False
                 for b in range(batch_size):
-                    if return_mask[b]:
-                        token_lists[b] = _prune_cot_single(token_lists[b])
+                    if b in return_indices and stacks[b]:
+                        thought_pos, solution_pos = stacks[b].pop()
+                        if solution_pos is not None:
+                            new_rows.append(torch.cat((tokens[b, :thought_pos], tokens[b, solution_pos:])))
+                            pruned_any = True
+                            continue
+                    new_rows.append(tokens[b])
 
-                max_len = max(len(s) for s in token_lists)
-                padded = []
-                new_mask = []
-                for s in token_lists:
-                    pad_len = max_len - len(s)
-                    padded.append(s + [eos_token_id] * pad_len)
-                    new_mask.append([1] * len(s) + [0] * pad_len)
+                if pruned_any:
+                    max_len = max(r.shape[0] for r in new_rows)
+                    tokens = torch.full((batch_size, max_len), eos_token_id, dtype=tokens.dtype, device=tokens.device)
+                    padding_mask = torch.zeros((batch_size, max_len), dtype=padding_mask.dtype, device=padding_mask.device)
+                    for b, r in enumerate(new_rows):
+                        tokens[b, :r.shape[0]] = r
+                        padding_mask[b, :r.shape[0]] = 1
 
-                tokens = torch.tensor(padded, dtype=tokens.dtype, device=tokens.device)
-                padding_mask = torch.tensor(new_mask, dtype=padding_mask.dtype, device=padding_mask.device)
-
-                # Check if earlier masked blocks still remain
-                remaining = extract_cot_blocks(
-                    tokens, thought_token_id, solution_token_id, return_token_id
-                )
-                has_active_blocks = any(len(b) > 0 for b in remaining)
+                    # Check if earlier masked blocks still remain
+                    remaining = extract_cot_blocks(
+                        tokens, thought_token_id, solution_token_id, return_token_id
+                    )
+                    has_active_blocks = any(len(b) > 0 for b in remaining)
 
     return tokens
