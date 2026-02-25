@@ -61,6 +61,10 @@ def generate(
         if not unfinished.any():
             break
 
+        # Honour all stopping criteria (e.g. MaxTimeCriteria, custom callbacks)
+        if stopping_criteria(tokens, next_token_logits).all():
+            break
+
         # Prune CoT per batch element that generated [RETURN]
         return_mask = next_tokens.squeeze(-1) == return_token_id
         if return_mask.any():
@@ -172,6 +176,10 @@ def generate_with_mask(
         # Check for EOS
         unfinished = unfinished & (next_tokens.squeeze(-1) != eos_token_id)
         if not unfinished.any():
+            break
+
+        # Honour all stopping criteria (e.g. MaxTimeCriteria, custom callbacks)
+        if stopping_criteria(tokens, next_token_logits).all():
             break
 
         # Handle [RETURN] token
