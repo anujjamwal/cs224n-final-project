@@ -99,12 +99,12 @@ def generate_with_mask(
     solution_token_id,
     thought_token_id,
     eos_token_id,
-    min_token_size,
+    min_token_length,
     **model_kwargs
 ):
-    """Generate with hierarchical masking below min_token_size, pruning above.
+    """Generate with hierarchical masking below min_token_length, pruning above.
 
-    Until the sequence reaches min_token_size tokens, completed
+    Until the sequence reaches min_token_length tokens, completed
     [THOUGHT]...[SOLUTION]...[RETURN] blocks are hidden via a 4-D attention
     mask (identical to MaterialisedMaskMixin) instead of being pruned away.
     Once the sequence is long enough, new blocks are pruned as in ``generate``.
@@ -159,8 +159,9 @@ def generate_with_mask(
     padding_mask = model_kwargs.pop('attention_mask')
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
     has_active_blocks = False
+    max_token_length = model_kwargs.get("max_new_tokens", stopping_criteria[0].max_length)
 
-    while tokens.shape[1] < stopping_criteria[0].max_length:
+    while tokens.shape[1] < max_token_length:
         if has_active_blocks:
             attn_mask = _build_4d_mask(tokens, padding_mask)
         else:
@@ -186,7 +187,7 @@ def generate_with_mask(
         # Handle [RETURN] token
         return_mask = next_tokens.squeeze(-1) == return_token_id
         if return_mask.any():
-            if tokens.shape[1] < min_token_size:
+            if tokens.shape[1] < min_token_length:
                 # Below threshold: mask the block instead of pruning
                 has_active_blocks = True
             else:
