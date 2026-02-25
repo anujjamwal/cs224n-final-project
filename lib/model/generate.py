@@ -46,8 +46,9 @@ def generate(
     # Track which batch elements are still generating
     attention_mask = model_kwargs.pop('attention_mask')
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
+    max_token_length = model_kwargs.get("max_new_tokens", stopping_criteria[0].max_length)
 
-    while tokens.shape[1] < stopping_criteria[0].max_length:
+    while tokens.shape[1] < max_token_length:
         outputs = model(tokens, attention_mask=attention_mask, **model_kwargs)
         logits = outputs.logits
         next_token_logits = logits_processor(tokens, logits[:, -1, :])
