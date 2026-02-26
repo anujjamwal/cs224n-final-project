@@ -155,11 +155,11 @@ class TestPruning:
             max_length=100,
         )
         tokens = result.sequences[0].tolist()
-        # After pruning: [THOUGHT], 10, 11 removed; [SOLUTION], 20, [RETURN] kept
-        assert THOUGHT_ID not in tokens
+        # After pruning: 10, 11, [SOLUTION] removed; [THOUGHT], 20, [RETURN] kept
+        assert THOUGHT_ID in tokens
         assert 10 not in tokens
         assert 11 not in tokens
-        assert SOLUTION_ID in tokens
+        assert SOLUTION_ID not in tokens
         assert 20 in tokens
         assert RETURN_ID in tokens
         # Verify per-record stats (batch_size=1)
@@ -218,10 +218,10 @@ class TestBatchPruning:
         b0 = result.sequences[0].tolist()
         b1 = result.sequences[1].tolist()
 
-        # Batch 0 should have reasoning pruned
-        assert THOUGHT_ID not in b0
+        # Batch 0 should have reasoning pruned (keep [THOUGHT], remove content + [SOLUTION])
+        assert THOUGHT_ID in b0
         assert 10 not in b0
-        assert SOLUTION_ID in b0
+        assert SOLUTION_ID not in b0
 
         # Batch 1 should be intact (no special tokens were generated)
         assert 3 in b1
@@ -369,10 +369,10 @@ class TestPruneAboveThreshold:
             min_token_length=1,
         )
         tokens = result.sequences[0].tolist()
-        # Thought span pruned, solution kept
-        assert THOUGHT_ID not in tokens
+        # Thought content + [SOLUTION] pruned, [THOUGHT] kept
+        assert THOUGHT_ID in tokens
         assert 10 not in tokens
-        assert SOLUTION_ID in tokens
+        assert SOLUTION_ID not in tokens
         assert 20 in tokens
 
     def test_mask_then_prune(self):

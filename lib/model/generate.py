@@ -104,7 +104,7 @@ def generate(
                     if solution_pos is not None:
                         prune_events[b] += 1
                         tokens_pruned[b] += solution_pos - thought_pos
-                        new_rows.append(torch.cat((tokens[b, :thought_pos], tokens[b, solution_pos:])))
+                        new_rows.append(torch.cat((tokens[b, :thought_pos+1], tokens[b, solution_pos+1:])))
                         pruned_any = True
                         continue
                 new_rows.append(tokens[b])
@@ -167,7 +167,7 @@ def generate_with_mask(
         for b in range(batch_size):
             mask = causal.clone()
             for thought_pos, solution_pos, return_pos in batch_blocks[b]:
-                mask[return_pos + 1:, thought_pos:solution_pos] = False
+                mask[return_pos + 1:, thought_pos+1:1+solution_pos] = False
             mask = mask & padding_mask_1d[b].bool().unsqueeze(0)
             masks.append(mask)
 
@@ -248,7 +248,7 @@ def generate_with_mask(
                         if solution_pos is not None:
                             prune_events[b] += 1
                             tokens_pruned[b] += solution_pos - thought_pos
-                            new_rows.append(torch.cat((tokens[b, :thought_pos], tokens[b, solution_pos:])))
+                            new_rows.append(torch.cat((tokens[b, :thought_pos+1], tokens[b, 1+solution_pos:])))
                             pruned_any = True
                             continue
                     new_rows.append(tokens[b])

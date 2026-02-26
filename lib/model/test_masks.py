@@ -113,19 +113,19 @@ class TestMaterialisedMask:
                     assert not _allowed(mask, 0, q, k), f"q={q}, k={k} should be blocked"
 
     def test_single_block_pruning(self):
-        """Tokens after [RETURN] cannot attend to [THOUGHT]..[SOLUTION) span."""
+        """Tokens after [RETURN] cannot attend to thought content and [SOLUTION], but keep [THOUGHT]."""
         # positions:  0   1          2  3         4          5       6          7
         ids = torch.tensor([[1, THOUGHT_ID, 2, 3, SOLUTION_ID, 4, RETURN_ID, 5]])
         mask = self._build(ids)
 
-        # Token at position 7 (after RETURN at 6) must NOT attend to positions 1,2,3
-        # (the [THOUGHT]..[SOLUTION) span = positions 1..4 exclusive = 1,2,3)
-        for k in [1, 2, 3]:
+        # Token at position 7 (after RETURN at 6) must NOT attend to positions 2,3,4
+        # (the thought content + [SOLUTION] = positions thought+1..solution+1 = 2,3,4)
+        for k in [2, 3, 4]:
             assert not _allowed(mask, 0, 7, k), f"pos 7 should NOT attend to {k}"
 
-        # But position 7 CAN attend to positions before the thought (0)
-        # and to the solution summary (4, 5) and return (6)
-        for k in [0, 4, 5, 6]:
+        # But position 7 CAN attend to positions before the thought (0),
+        # the [THOUGHT] token itself (1), the solution summary (5) and return (6)
+        for k in [0, 1, 5, 6]:
             assert _allowed(mask, 0, 7, k), f"pos 7 SHOULD attend to {k}"
 
         # Tokens inside the reasoning span can still attend to each other (causal)
@@ -163,23 +163,24 @@ class TestMaterialisedMask:
         mask = self._build(ids)
 
         # After outer return (pos 10):
-        # - inner reasoning span [2,4) = positions 2,3 should be blocked
-        # - outer reasoning span [0,7) = positions 0,1,2,3,4,5,6 should be blocked
-        for k in [0, 1, 2, 3, 4, 5, 6]:
+        # - inner block masks thought+1..solution+1 = positions 3,4
+        # - outer block masks thought+1..solution+1 = positions 1,2,3,4,5,6,7
+        # Combined: positions 1..7 should be blocked (but [THOUGHT] tokens 0,2 kept)
+        for k in [1, 2, 3, 4, 5, 6, 7]:
             assert not _allowed(mask, 0, 10, k), f"pos 10 should NOT attend to {k}"
 
-        # But can attend to outer solution summary and beyond
-        for k in [7, 8, 9]:
+        # pos 10 CAN attend to outer [THOUGHT] (0) and outer solution summary (8), return (9)
+        for k in [0, 8, 9]:
             assert _allowed(mask, 0, 10, k), f"pos 10 SHOULD attend to {k}"
 
         # After inner return (pos 7 onward but before outer return):
-        # position 8 should NOT attend to inner reasoning [2,4) = 2,3
-        for k in [2, 3]:
+        # position 8 should NOT attend to inner thought content + [SOLUTION] = 3,4
+        for k in [3, 4]:
             assert not _allowed(mask, 0, 8, k), f"pos 8 should NOT attend to {k}"
 
-        # But position 8 CAN attend to the outer thought region (0, 1) since
-        # the outer block isn't closed yet at position 8
-        for k in [0, 1]:
+        # But position 8 CAN attend to the outer thought region (0, 1) and
+        # inner [THOUGHT] (2) since the outer block isn't closed yet at position 8
+        for k in [0, 1, 2]:
             assert _allowed(mask, 0, 8, k), f"pos 8 SHOULD attend to {k}"
 
     def test_padding_mask(self):
@@ -205,9 +206,11 @@ class TestMaterialisedMask:
         ])
         mask = self._build(ids)
 
-        # Batch 0: post-return (pos 6) blocked from reasoning [1,3)
-        assert not _allowed(mask, 0, 6, 1)
+        # Batch 0: post-return (pos 6) blocked from thought content + [SOLUTION] (pos 2, 3)
+        # but [THOUGHT] (pos 1) is kept
+        assert _allowed(mask, 0, 6, 1)
         assert not _allowed(mask, 0, 6, 2)
+        assert not _allowed(mask, 0, 6, 3)
 
         # Batch 1: pure causal — pos 6 can attend to everything before it
         for k in range(7):
@@ -310,9 +313,10 @@ class TestBuildMinBlockedQ:
         blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
         mbq = build_min_blocked_q(ids, blocks)
         seq_len = ids.shape[1]
-        # Positions 1,2 (thought..solution exclusive) should be blocked starting at return+1=6
-        assert mbq[0, 1].item() == 6
+        # Positions 2,3 (thought+1..solution+1) should be blocked starting at return+1=6
+        # [THOUGHT] at pos 1 is kept (not blocked)
         assert mbq[0, 2].item() == 6
-        # Other positions remain at seq_len
+        assert mbq[0, 3].item() == 6
+        # Other positions remain at seq_len (including [THOUGHT] at pos 1)
         assert mbq[0, 0].item() == seq_len
-        assert mbq[0, 3].item() == seq_len
+        assert mbq[0, 1].item() == seq_len

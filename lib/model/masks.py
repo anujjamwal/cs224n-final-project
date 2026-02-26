@@ -40,9 +40,10 @@ def build_min_blocked_q(input_ids, batch_blocks):
     )
     for b, blocks in enumerate(batch_blocks):
         for thought_pos, solution_pos, return_pos in blocks:
-            span = min_blocked_q[b, thought_pos:solution_pos]
+            # By reduction rule we maintain [THOUGHT] and [RETURN] tokens.
+            span = min_blocked_q[b, thought_pos+1:solution_pos+1]
             threshold = torch.full_like(span, return_pos + 1)
-            min_blocked_q[b, thought_pos:solution_pos] = torch.minimum(span, threshold)
+            min_blocked_q[b, thought_pos+1:solution_pos+1] = torch.minimum(span, threshold)
     return min_blocked_q
 
 
@@ -116,7 +117,8 @@ class MaterialisedMaskMixin:
         for b in range(batch_size):
             mask = causal.clone()
             for thought_pos, solution_pos, return_pos in batch_blocks[b]:
-                mask[return_pos + 1:, thought_pos:solution_pos] = False
+                # By reduction rule we maintain [THOUGHT] and [RETURN] tokens.
+                mask[return_pos + 1:, thought_pos+1:solution_pos+1] = False
             if padding_mask is not None:
                 mask = mask & padding_mask[b].bool().unsqueeze(0)
             masks.append(mask)
