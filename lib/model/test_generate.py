@@ -5,7 +5,7 @@ import torch
 from dataclasses import dataclass
 from transformers import LogitsProcessorList, StoppingCriteriaList
 
-from .generate import generate, generate_with_mask
+from .generate import generate, generate_with_mask, HCotGenerateOutput
 
 # ---------------------------------------------------------------------------
 # Token IDs used throughout tests
@@ -111,7 +111,8 @@ class TestEOSStopping:
             prompt=[[1, 2]],
             max_length=100,
         )
-        assert result[0].tolist() == [1, 2, 3, EOS_ID]
+        assert isinstance(result, HCotGenerateOutput)
+        assert result.sequences[0].tolist() == [1, 2, 3, EOS_ID]
 
     def test_stops_on_max_length(self):
         """Generation should stop when max_length is reached."""
@@ -121,7 +122,7 @@ class TestEOSStopping:
             prompt=[[1, 2]],
             max_length=5,
         )
-        assert result[0].tolist() == [1, 2, 3, 4, 5]
+        assert result.sequences[0].tolist() == [1, 2, 3, 4, 5]
 
     def test_batch_eos_all_must_finish(self):
         """Loop continues until ALL batch elements hit EOS."""
@@ -138,7 +139,7 @@ class TestEOSStopping:
         # Batch 0: [1, 2, EOS] (stopped first but loop continues for b1)
         # Batch 1: step 0 → 3, step 1 → EOS → [1, 2, 3, EOS]
         # Both are in the same tensor so they share seq_len dimension
-        assert result.shape[0] == 2
+        assert result.sequences.shape[0] == 2
 
 
 class TestPruning:
@@ -153,7 +154,7 @@ class TestPruning:
             prompt=[[1]],
             max_length=100,
         )
-        tokens = result[0].tolist()
+        tokens = result.sequences[0].tolist()
         # After pruning: [THOUGHT], 10, 11 removed; [SOLUTION], 20, [RETURN] kept
         assert THOUGHT_ID not in tokens
         assert 10 not in tokens
@@ -161,6 +162,12 @@ class TestPruning:
         assert SOLUTION_ID in tokens
         assert 20 in tokens
         assert RETURN_ID in tokens
+        # Verify per-record stats (batch_size=1)
+        assert result.prune_events == [1]
+        assert result.tokens_pruned[0] > 0
+        assert result.prompt_tokens == 1
+        assert result.total_tokens_processed[0] > 0
+        assert result.wall_time_seconds > 0
 
     def test_no_prune_without_return(self):
         """Without [RETURN], no pruning should occur."""
@@ -169,11 +176,13 @@ class TestPruning:
             prompt=[[1]],
             max_length=100,
         )
-        tokens = result[0].tolist()
+        tokens = result.sequences[0].tolist()
         assert THOUGHT_ID in tokens
         assert 10 in tokens
         assert SOLUTION_ID in tokens
         assert 20 in tokens
+        assert result.prune_events == [0]
+        assert result.tokens_pruned == [0]
 
     def test_no_prune_thought_without_solution(self):
         """[THOUGHT] ... [RETURN] with no [SOLUTION] should not prune."""
@@ -182,7 +191,7 @@ class TestPruning:
             prompt=[[1]],
             max_length=100,
         )
-        tokens = result[0].tolist()
+        tokens = result.sequences[0].tolist()
         # Nothing pruned — THOUGHT and reasoning tokens still present
         assert THOUGHT_ID in tokens
         assert 10 in tokens
@@ -206,8 +215,8 @@ class TestBatchPruning:
             max_length=100,
             batch_size=2,
         )
-        b0 = result[0].tolist()
-        b1 = result[1].tolist()
+        b0 = result.sequences[0].tolist()
+        b1 = result.sequences[1].tolist()
 
         # Batch 0 should have reasoning pruned
         assert THOUGHT_ID not in b0
@@ -294,7 +303,8 @@ class TestMaskBelowThreshold:
             max_length=100,
             min_token_length=100,
         )
-        tokens = result[0].tolist()
+        assert isinstance(result, HCotGenerateOutput)
+        tokens = result.sequences[0].tolist()
         # All tokens should still be present (masked, not pruned)
         assert THOUGHT_ID in tokens
         assert 10 in tokens
@@ -358,7 +368,7 @@ class TestPruneAboveThreshold:
             max_length=100,
             min_token_length=1,
         )
-        tokens = result[0].tolist()
+        tokens = result.sequences[0].tolist()
         # Thought span pruned, solution kept
         assert THOUGHT_ID not in tokens
         assert 10 not in tokens
@@ -383,7 +393,7 @@ class TestPruneAboveThreshold:
             max_length=100,
             min_token_length=8,
         )
-        tokens = result[0].tolist()
+        tokens = result.sequences[0].tolist()
         # Block 1 should still be in the sequence (masked, not pruned)
         assert 10 in tokens
         # Block 2's thought span should be pruned
