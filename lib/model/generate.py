@@ -8,6 +8,35 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 from .masks import extract_cot_blocks
 
+# Keys that HuggingFace's generate() adds to model_kwargs but that must NOT
+# be forwarded to the model's forward() method.  When our custom generate
+# functions are called as ``custom_generate`` callables, HF prepares these
+# values for its own _sample loop.  Since we run our own loop we must strip
+# them to avoid (a) stale ``position_ids`` causing wrong rotary embeddings
+# after the sequence length changes, and (b) spurious kwargs like
+# ``generation_config`` reaching the model forward.
+_HF_GENERATE_EXTRA_KEYS = frozenset({
+    "position_ids",
+    "generation_config",
+    "cache_position",
+    "logits_to_keep",
+})
+
+
+def _clean_model_kwargs(model_kwargs: dict) -> dict:
+    """Remove HuggingFace-injected keys that should not reach model.forward().
+
+    ``position_ids`` is particularly critical: HF computes it once for the
+    initial prompt length.  Our custom loops change the sequence length on every
+    step (append) and on prune events (shrink), so the stale tensor would feed
+    the model incorrect rotary position embeddings, destabilising generation.
+    By removing it, the model recomputes position_ids from the attention mask
+    on each forward call, which is always correct.
+    """
+    for key in _HF_GENERATE_EXTRA_KEYS:
+        model_kwargs.pop(key, None)
+    return model_kwargs
+
 
 @dataclass
 class HCotGenerateOutput(GenerateDecoderOnlyOutput):
@@ -58,10 +87,12 @@ def generate(
 
     # Track which batch elements are still generating
     attention_mask = model_kwargs.pop('attention_mask')
+    _clean_model_kwargs(model_kwargs)
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
     max_token_length = model_kwargs.get("max_new_tokens", stopping_criteria[0].max_length)
+    max_new_tokens = max_token_length - prompt_tokens
 
-    while tokens.shape[1] < max_token_length:
+    while tokens.shape[1] < max_token_length and num_generated < max_new_tokens:
         for b in range(batch_size):
             total_tokens_processed[b] += tokens.shape[1]
         num_generated += 1
@@ -98,12 +129,16 @@ def generate(
         if return_indices:
             new_rows = []
             pruned_any = False
+            # Track per-element shift so remaining stack entries can be adjusted
+            shifts = [0] * batch_size
             for b in range(batch_size):
                 if b in return_indices and stacks[b]:
                     thought_pos, solution_pos = stacks[b].pop()
                     if solution_pos is not None:
                         prune_events[b] += 1
-                        tokens_pruned[b] += solution_pos - thought_pos
+                        removed = solution_pos - thought_pos
+                        tokens_pruned[b] += removed
+                        shifts[b] = removed
                         new_rows.append(torch.cat((tokens[b, :thought_pos+1], tokens[b, solution_pos+1:])))
                         pruned_any = True
                         continue
@@ -116,6 +151,13 @@ def generate(
                 for b, r in enumerate(new_rows):
                     tokens[b, :r.shape[0]] = r
                     attention_mask[b, :r.shape[0]] = 1
+                # Adjust remaining stack entries whose positions shifted
+                for b in range(batch_size):
+                    if shifts[b] > 0:
+                        for entry in stacks[b]:
+                            entry[0] -= shifts[b]
+                            if entry[1] is not None:
+                                entry[1] -= shifts[b]
 
     wall_time = time.perf_counter() - start_time
     output_tokens = attention_mask.sum(dim=1).tolist()
@@ -189,12 +231,14 @@ def generate_with_mask(
     tokens_pruned = [0] * batch_size
 
     padding_mask = model_kwargs.pop('attention_mask')
+    _clean_model_kwargs(model_kwargs)
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
     has_active_blocks = False
     stacks = [[] for _ in range(batch_size)]
     max_token_length = model_kwargs.get("max_new_tokens", stopping_criteria[0].max_length)
+    max_new_tokens = max_token_length - prompt_tokens
 
-    while tokens.shape[1] < max_token_length:
+    while tokens.shape[1] < max_token_length and num_generated < max_new_tokens:
         for b in range(batch_size):
             total_tokens_processed[b] += tokens.shape[1]
         num_generated += 1
@@ -242,12 +286,15 @@ def generate_with_mask(
                 # Above threshold: prune the block
                 new_rows = []
                 pruned_any = False
+                shifts = [0] * batch_size
                 for b in range(batch_size):
                     if b in return_indices and stacks[b]:
                         thought_pos, solution_pos = stacks[b].pop()
                         if solution_pos is not None:
                             prune_events[b] += 1
-                            tokens_pruned[b] += solution_pos - thought_pos
+                            removed = solution_pos - thought_pos
+                            tokens_pruned[b] += removed
+                            shifts[b] = removed
                             new_rows.append(torch.cat((tokens[b, :thought_pos+1], tokens[b, 1+solution_pos:])))
                             pruned_any = True
                             continue
@@ -260,6 +307,14 @@ def generate_with_mask(
                     for b, r in enumerate(new_rows):
                         tokens[b, :r.shape[0]] = r
                         padding_mask[b, :r.shape[0]] = 1
+
+                    # Adjust remaining stack entries whose positions shifted
+                    for b in range(batch_size):
+                        if shifts[b] > 0:
+                            for entry in stacks[b]:
+                                entry[0] -= shifts[b]
+                                if entry[1] is not None:
+                                    entry[1] -= shifts[b]
 
                     # Check if earlier masked blocks still remain
                     remaining = extract_cot_blocks(

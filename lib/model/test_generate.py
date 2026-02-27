@@ -5,7 +5,7 @@ import torch
 from dataclasses import dataclass
 from transformers import LogitsProcessorList, StoppingCriteriaList
 
-from .generate import generate, generate_with_mask, HCotGenerateOutput
+from .generate import generate, generate_with_mask, HCotGenerateOutput, _clean_model_kwargs
 
 # ---------------------------------------------------------------------------
 # Token IDs used throughout tests
@@ -400,3 +400,97 @@ class TestPruneAboveThreshold:
         assert 11 not in tokens
         # Block 2's solution should be kept
         assert 21 in tokens
+
+
+class TestCleanModelKwargs:
+    def test_removes_position_ids(self):
+        """position_ids should be stripped so the model recomputes it each step."""
+        kwargs = {
+            "position_ids": torch.tensor([[0, 1, 2]]),
+            "use_cache": False,
+            "attention_mask": torch.ones(1, 3),
+        }
+        _clean_model_kwargs(kwargs)
+        assert "position_ids" not in kwargs
+        # use_cache and attention_mask should be preserved
+        assert "use_cache" in kwargs
+        assert "attention_mask" in kwargs
+
+    def test_removes_generation_config(self):
+        """generation_config should not reach model.forward()."""
+        kwargs = {"generation_config": object(), "use_cache": True}
+        _clean_model_kwargs(kwargs)
+        assert "generation_config" not in kwargs
+        assert kwargs["use_cache"] is True
+
+    def test_removes_cache_position_and_logits_to_keep(self):
+        kwargs = {"cache_position": torch.tensor([0, 1]), "logits_to_keep": 1}
+        _clean_model_kwargs(kwargs)
+        assert "cache_position" not in kwargs
+        assert "logits_to_keep" not in kwargs
+
+    def test_noop_when_keys_absent(self):
+        """No error when the keys aren't present."""
+        kwargs = {"use_cache": False}
+        _clean_model_kwargs(kwargs)
+        assert kwargs == {"use_cache": False}
+
+
+class TestMaxGeneratedTokensGuard:
+    def test_generate_respects_max_new_tokens_with_pruning(self):
+        """Even with pruning shortening the sequence, generate must not exceed max_new_tokens steps."""
+        # Script: THOUGHT, 10, SOLUTION, 20, RETURN, then repeat the same pattern 10 more times
+        # then EOS. With aggressive pruning the sequence stays short, but the loop must stop.
+        block = [THOUGHT_ID, 10, SOLUTION_ID, 20, RETURN_ID]
+        # 3 full blocks = 15 tokens, then EOS
+        script_tokens = block * 3 + [EOS_ID]
+        script_tokens = [[t] for t in script_tokens]
+        script = [torch.tensor(step) for step in script_tokens]
+        model = ScriptedModel(script, vocab_size=200)
+        input_ids = torch.tensor([[1, 2]], dtype=torch.long)
+        attention_mask = torch.ones_like(input_ids)
+        # max_length = 8 → max_new_tokens = 8 - 2 = 6
+        result = generate(
+            model=model,
+            input_ids=input_ids,
+            logits_processor=_identity_processor(),
+            stopping_criteria=_stopping(8),
+            return_token_id=RETURN_ID,
+            solution_token_id=SOLUTION_ID,
+            thought_token_id=THOUGHT_ID,
+            eos_token_id=EOS_ID,
+            attention_mask=attention_mask,
+        )
+        # With max_new_tokens = 6, the loop should stop after 6 generated tokens
+        # even though pruning keeps the sequence short
+        assert result.generated_tokens <= 6
+
+
+class TestStackAdjustmentAfterPrune:
+    def test_nested_stack_positions_adjusted(self):
+        """After pruning an inner block, outer stack entries must be shifted."""
+        # Prompt: [1]
+        # Script: outer THOUGHT, inner THOUGHT, 10, SOLUTION, 20, RETURN,
+        #         (inner block pruned, outer THOUGHT stack entry should shift)
+        #         outer SOLUTION, 30, outer RETURN, EOS
+        result = _run(
+            script_tokens=[
+                [THOUGHT_ID],  # outer thought at pos 1
+                [THOUGHT_ID],  # inner thought at pos 2
+                [10],          # reasoning at pos 3
+                [SOLUTION_ID], # inner solution at pos 4
+                [20],          # inner summary at pos 5
+                [RETURN_ID],   # inner return at pos 6 → prune inner block
+                [SOLUTION_ID], # outer solution (now at shifted pos)
+                [30],          # outer summary
+                [RETURN_ID],   # outer return → prune outer block
+                [EOS_ID],
+            ],
+            prompt=[[1]],
+            max_length=100,
+        )
+        # Both inner and outer blocks should be pruned
+        assert result.prune_events == [2]
+        tokens = result.sequences[0].tolist()
+        # Inner reasoning (10) should be pruned
+        assert 10 not in tokens
