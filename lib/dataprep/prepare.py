@@ -51,7 +51,7 @@ def parse_args():
         "--method",
         choices=["api", "cli"],
         default="cli",
-        help="Use Anthropic Python API or Claude CLI subprocess (default: cli)",
+        help="Use Python API or CLI subprocess (default: cli)",
     )
     parser.add_argument(
         "--offset",
@@ -79,6 +79,12 @@ def parse_args():
         type=int,
         default=segment.DEFAULT_PARALLELISM,
         help=f"Parallel workers for CLI method (default: {segment.DEFAULT_PARALLELISM})",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help=f"Directory to cache LLM outputs (default: {segment.DEFAULT_OUTPUT_DIR})",
     )
     return parser.parse_args()
 
@@ -111,24 +117,26 @@ def load_existing():
 # Processing
 # ---------------------------------------------------------------------------
 
-def process_with_api(examples, model, parallelism):
-    def _segment(x):
+def process_with_api(examples, model, parallelism, output_dir):
+    if output_dir is None:
+        output_dir = segment.DEFAULT_OUTPUT_DIR
+
+    def _segment(x, idx):
+        output_file = os.path.join(output_dir, f"example_{x["id"]}.txt")
         x["hcot_model"] = model
         try:
             x["hierarchical_cot"], x["hierarchical_cot_raw"] = segment.segment_chain_of_thought(
-                x["question"], x["generated_solution"], x["expected_answer"], model=model
+                x["question"], x["generated_solution"], x["expected_answer"], model=model, output_file=output_file
             )
         except Exception as e:
-            logger.error("Failed to segment problem %r: %s", x["question"][:80], e)
+            logger.error("Failed to segment problem %r (index %s): %s", x["question"][:80], x["id"], e)
             x["hierarchical_cot"], x["hierarchical_cot_raw"] = "", ""
         return x
 
-    return examples.map(_segment, num_proc=parallelism)
+    return examples.map(_segment, with_indices=True, num_proc=parallelism)
 
 
-def process_with_cli(examples, model, parallelism):
-    if model.startswith("gemini-"):
-        raise ValueError(f"CLI method is not supported for Gemini models ({model!r}). Use --method api instead.")
+def process_with_cli(examples, model, parallelism, output_dir):
     raw = [
         {
             "problem_statement": ex["question"],
@@ -137,7 +145,7 @@ def process_with_cli(examples, model, parallelism):
         }
         for ex in examples
     ]
-    results = segment.process_examples_parallel(raw, parallelism=parallelism, model=model)
+    results = segment.process_examples_parallel(raw, parallelism=parallelism, model=model, output_dir=output_dir)
 
     def _attach(x, idx):
         x["hierarchical_cot"], x["hierarchical_cot_raw"] = results[idx]
@@ -165,7 +173,7 @@ def main():
     # Determine which records still need processing.
     if existing is not None:
         done_problems = set(
-            existing.filter(lambda x: bool(x["hierarchical_cot"]))["question"]
+            existing.filter(lambda x: len(x["hierarchical_cot"]) > 50)["question"]
         )
         to_process = source.filter(lambda x: x["question"] not in done_problems)
         logger.info(
@@ -183,9 +191,9 @@ def main():
     else:
         logger.info("Processing %d records via %s", len(to_process), args.method)
         if args.method == "api":
-            newly_processed = process_with_api(to_process, args.model, args.parallelism)
+            newly_processed = process_with_api(to_process, args.model, args.parallelism, args.output_dir)
         else:
-            newly_processed = process_with_cli(to_process, args.model, args.parallelism)
+            newly_processed = process_with_cli(to_process, args.model, args.parallelism, args.output_dir)
 
     # Build the final dataset to push.
     if args.mode == "append" and existing is not None:

@@ -1,19 +1,29 @@
 import logging
-import anthropic
 import os
 import subprocess
 import time
 import concurrent.futures
 import tenacity
 import re
-from google import genai
-from google.genai import types
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
 
 
 logger = logging.getLogger(__name__)
 
-CLAUDE_PROMPT = """You are a research assistant that is helping me prepare a dataset for training a new kind of reasoning LLM.
+PERSONA = "You are a research assistant that is helping me prepare a dataset for training a new kind of reasoning LLM."
 
+PROMPT = """
 ## Background
 Let me give you some background on my research. Traditionally, CoT are treated as long append-only structure which keeps growing
 as the LLM attemps to solve the problem at hand. However, this structure is very inefficient and resource heavy due to all the
@@ -121,7 +131,14 @@ MAX_TOKENS = 16000
 THINKING_BUDGET = 10000
 
 
-def segment_chain_of_thought(problem_statement, chain_of_thought, final_solution, model=None):
+def segment_chain_of_thought(problem_statement, chain_of_thought, final_solution, model=None, output_file=None):
+    if output_file and os.path.exists(output_file):
+        with open(output_file, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+            if content:
+                logger.info(f"Found cached content in {output_file}. Skipping API invocation.")
+                return parse_result(content)
+
     if model is None:
         model = os.environ.get("MODEL", "claude-sonnet-4-6")
     prompt = CLAUDE_INPUT.format(
@@ -130,6 +147,12 @@ def segment_chain_of_thought(problem_statement, chain_of_thought, final_solution
         final_solution=final_solution,
     )
     result = call_llm_api(prompt, model=model)
+
+    if output_file:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(result)
+
     return parse_result(result)
 
 
@@ -147,10 +170,18 @@ def call_llm_api(prompt, model):
         raise ValueError(f"Unknown model prefix in {model!r}. Model must start with 'claude-' or 'gemini-'.")
 
 
-@tenacity.retry(retry=tenacity.retry_if_exception(anthropic.RateLimitError),
+def _is_anthropic_rate_limit_error(e):
+    if anthropic is None:
+        return False
+    return isinstance(e, anthropic.RateLimitError)
+
+
+@tenacity.retry(retry=tenacity.retry_if_exception(_is_anthropic_rate_limit_error),
                 wait=tenacity.wait_exponential_jitter(),
                 stop=tenacity.stop_after_attempt(5))
 def call_claude(prompt, model, max_tokens=MAX_TOKENS, thinking_budget=THINKING_BUDGET):
+    if anthropic is None:
+        raise ImportError("The 'anthropic' package is not installed. Please install it with 'pip install anthropic' to use Claude models via API.")
     client = anthropic.Anthropic()
     response = client.messages.create(
         model=model,
@@ -160,7 +191,8 @@ def call_claude(prompt, model, max_tokens=MAX_TOKENS, thinking_budget=THINKING_B
             "budget_tokens": thinking_budget,
         },
         messages=[
-            {"role": "user", "content": CLAUDE_PROMPT},
+            {"role": "user", "content": PERSONA},
+            {"role": "user", "content": PROMPT},
             {"role": "user", "content": prompt}
         ],
     )
@@ -170,15 +202,34 @@ def call_claude(prompt, model, max_tokens=MAX_TOKENS, thinking_budget=THINKING_B
     return ""
 
 
-@tenacity.retry(retry=tenacity.retry_if_exception(lambda e: "429" in str(e) or "ResourceExhausted" in str(e)),
+def _is_gemini_retryable_error(e):
+    err_str = str(e)
+    return "429" in err_str or "ResourceExhausted" in err_str
+
+
+@tenacity.retry(retry=tenacity.retry_if_exception(_is_gemini_retryable_error),
                 wait=tenacity.wait_exponential_jitter(),
                 stop=tenacity.stop_after_attempt(5))
 def call_gemini(prompt, model, max_tokens=MAX_TOKENS):
+    if genai is None:
+        raise ImportError("The 'google-genai' package is not installed. Please install it with 'pip install google-genai' to use Gemini models via API.")
     client = genai.Client()
     
     response = client.models.generate_content(
         model=model,
         contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(text=PERSONA),
+                ],
+            ),
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(text=PROMPT),
+                ],
+            ),
             types.Content(
                 role="user",
                 parts=[
@@ -202,6 +253,7 @@ ALLOWED_MODELS = {
     "claude-sonnet-4-6",
     "claude-opus-4-6",
     "gemini-3.1-pro-preview",
+    "gemini-3-pro-preview"
 }
 
 CLI_MAX_RETRIES = int(os.environ.get("CLI_MAX_RETRIES", "5"))
@@ -209,35 +261,57 @@ CLI_TIMEOUT = int(os.environ.get("CLI_TIMEOUT", "900"))
 DEFAULT_PARALLELISM = int(os.environ.get("PARALLELISM", "4"))
 
 
-def call_llm_cli(prompt, model=None, output_file=None, max_retries=CLI_MAX_RETRIES, timeout=CLI_TIMEOUT):
-    """Invoke the claude CLI to process a prompt. The system prompt and user prompt
-    are concatenated and passed via stdin using the -p (print) flag.
+def call_llm_cli(prompt, model, output_file=None):
+    """Invoke the correct LLM CLI to process a prompt based on model name prefix."""
+    if model.startswith("gemini-"):
+        return call_gemini_cli(prompt, model=model, output_file=output_file)
+    elif model.startswith("claude-"):
+        return call_claude_cli(prompt, model=model, output_file=output_file)
+    else:
+        raise ValueError(f"Unknown model prefix in {model!r}. Model must start with 'claude-' or 'gemini-'.")
+
+
+def call_claude_cli(prompt, model=None, output_file=None, max_retries=CLI_MAX_RETRIES, timeout=CLI_TIMEOUT):
+    if model is None:
+        model = os.environ.get("CLAUDE_CLI_MODEL", "claude-opus-4-6")
+    if model not in ALLOWED_MODELS:
+        raise ValueError(f"Unknown model {model!r}. Must be one of: {sorted(ALLOWED_MODELS)}")
+
+    full_prompt = "\n\n".join([PERSONA, PROMPT, prompt])
+    cmd = ["claude", "-p", "--model", model]
+    
+    return _call_cli(cmd, full_prompt, output_file, max_retries, timeout)
+
+
+def call_gemini_cli(prompt, model=None, output_file=None, max_retries=CLI_MAX_RETRIES, timeout=CLI_TIMEOUT):
+    if model is None:
+        model = os.environ.get("GEMINI_CLI_MODEL", "gemini-3.1-pro")
+    if model not in ALLOWED_MODELS:
+        raise ValueError(f"Unknown model {model!r}. Must be one of: {sorted(ALLOWED_MODELS)}")
+
+    full_prompt = PROMPT + "\n\n" + prompt
+    cmd = ["gemini", "--model", model, "--prompt", PERSONA]
+    
+    return _call_cli(cmd, full_prompt, output_file, max_retries, timeout)
+
+
+def _call_cli(cmd, full_prompt, output_file=None, max_retries=CLI_MAX_RETRIES, timeout=CLI_TIMEOUT):
+    """A generic helper to invoke a CLI tool to process a prompt. The system prompt
+    and user prompt are concatenated and passed via stdin.
 
     stdout and stderr are streamed directly to file pipes (output_file and
     output_file + ".err") when output_file is provided, otherwise to
     subprocess.PIPE. The subprocess inherits the current process environment
-    so the claude CLI can access its stored login/session credentials.
+    so the CLI can access its stored login/session credentials.
 
     Safety notes:
     - The prompt is passed via stdin (not a CLI arg), so no shell escaping is needed.
     - The command is given as a list with shell=False (default), so the shell never
       interprets it; shlex.quote() would be wrong and harmful in that context.
-    - The model is checked against ALLOWED_MODELS to catch misconfigured env variables
-      before they reach the subprocess call.
     """
-    if model is None:
-        model = os.environ.get("CLAUDE_CLI_MODEL", "claude-opus-4-6")
-
-    if model.startswith("gemini-"):
-        raise ValueError(f"CLI method is not supported for Gemini models ({model!r}). Use --method api instead.")
-
-    if model not in ALLOWED_MODELS:
-        raise ValueError(f"Unknown model {model!r}. Must be one of: {sorted(ALLOWED_MODELS)}")
-
-    full_prompt = CLAUDE_PROMPT + "\n\n" + prompt
-
     for attempt in range(max_retries):
         stdout_fh = stderr_fh = None
+        cli_name = cmd[0]
         try:
             if output_file is not None:
                 stdout_fh = open(output_file, "w", encoding="utf-8")
@@ -247,7 +321,7 @@ def call_llm_cli(prompt, model=None, output_file=None, max_retries=CLI_MAX_RETRI
                 stdout_arg, stderr_arg = subprocess.PIPE, subprocess.PIPE
 
             result = subprocess.run(
-                ["claude", "-p", "--model", model],
+                cmd,
                 input=full_prompt,
                 stdout=stdout_arg,
                 stderr=stderr_arg,
@@ -268,13 +342,13 @@ def call_llm_cli(prompt, model=None, output_file=None, max_retries=CLI_MAX_RETRI
 
             stderr_msg = f"see {output_file}.err" if output_file else result.stderr.strip()
             logger.warning(
-                "Claude CLI non-zero exit (attempt %d/%d): %s",
-                attempt + 1, max_retries, stderr_msg,
+                "%s CLI non-zero exit (attempt %d/%d): %s",
+                cli_name, attempt + 1, max_retries, stderr_msg,
             )
         except subprocess.TimeoutExpired:
-            logger.warning("Claude CLI timed out (attempt %d/%d)", attempt + 1, max_retries)
+            logger.warning("%s CLI timed out (attempt %d/%d)", cli_name, attempt + 1, max_retries)
         except Exception as e:
-            logger.warning("Claude CLI exception (attempt %d/%d): %s", attempt + 1, max_retries, e)
+            logger.warning("%s CLI exception (attempt %d/%d): %s", cli_name, attempt + 1, max_retries, e)
         finally:
             if stdout_fh is not None:
                 stdout_fh.close()
@@ -284,10 +358,10 @@ def call_llm_cli(prompt, model=None, output_file=None, max_retries=CLI_MAX_RETRI
         if attempt < max_retries - 1:
             time.sleep(2 ** attempt)
 
-    raise RuntimeError(f"Claude CLI failed after {max_retries} attempts")
+    raise RuntimeError(f"{cmd[0]} CLI failed after {max_retries} attempts")
 
 
-def segment_chain_of_thought_with_claude_cli(problem_statement, chain_of_thought, final_solution, model=None, output_file=None):
+def segment_chain_of_thought_with_cli(problem_statement, chain_of_thought, final_solution, model=None, output_file=None):
     """Segment a single example using the Claude CLI."""
     prompt = CLAUDE_INPUT.format(
         problem_statement=problem_statement,
@@ -308,10 +382,10 @@ def parse_result(result):
     return hierarchical_cot, result
 
 
-CLI_OUTPUT_DIR = os.environ.get("CLI_OUTPUT_DIR", "cli_outputs")
+DEFAULT_OUTPUT_DIR = os.environ.get("OUTPUT_DIR", "outputs")
 
 
-def process_examples_parallel(examples, parallelism=DEFAULT_PARALLELISM, model=None):
+def process_examples_parallel(examples, parallelism=DEFAULT_PARALLELISM, model=None, output_dir=None):
     """Process a list of examples in parallel using the Claude CLI.
 
     Each element of *examples* should be a dict with keys:
@@ -319,16 +393,19 @@ def process_examples_parallel(examples, parallelism=DEFAULT_PARALLELISM, model=N
         - chain_of_thought
         - final_solution
 
-    Each CLI call writes its output to CLI_OUTPUT_DIR/example_{idx}.txt.
+    Each CLI call writes its output to output_dir/example_{idx}.txt.
 
     Returns a list of (example, result_or_exception) tuples in the same order
     as the input.
     """
-    os.makedirs(CLI_OUTPUT_DIR, exist_ok=True)
+    if output_dir is None:
+        output_dir = DEFAULT_OUTPUT_DIR
+        
+    os.makedirs(output_dir, exist_ok=True)
     results = [None] * len(examples)
 
     def _process(idx, example):
-        output_file = os.path.join(CLI_OUTPUT_DIR, f"example_{idx}.txt")
+        output_file = os.path.join(output_dir, f"example_{idx}.txt")
 
         if output_file and os.path.exists(output_file):
             with open(output_file, "r", encoding="utf-8") as f:
@@ -342,7 +419,7 @@ def process_examples_parallel(examples, parallelism=DEFAULT_PARALLELISM, model=N
 
         try:
             logger.info("Running CLI for examples %d", idx)
-            output = segment_chain_of_thought_with_claude_cli(
+            output = segment_chain_of_thought_with_cli(
                 problem_statement=example["problem_statement"],
                 chain_of_thought=example["chain_of_thought"],
                 final_solution=example["final_solution"],

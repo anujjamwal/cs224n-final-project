@@ -1,9 +1,11 @@
 *.pyc
 .data/
 .env
+.vscode
 
 __pycache__/
 .pytest_cache/
 .claude/
 *.txt
 *.err
+package-lock.json
