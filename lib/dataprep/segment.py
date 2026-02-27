@@ -6,6 +6,9 @@ import time
 import concurrent.futures
 import tenacity
 import re
+from google import genai
+from google.genai import types
+
 
 logger = logging.getLogger(__name__)
 
@@ -118,20 +121,36 @@ MAX_TOKENS = 16000
 THINKING_BUDGET = 10000
 
 
-def segment_chain_of_thought_with_claude(problem_statement, chain_of_thought, final_solution):
+def segment_chain_of_thought(problem_statement, chain_of_thought, final_solution, model=None):
+    if model is None:
+        model = os.environ.get("MODEL", "claude-sonnet-4-6")
     prompt = CLAUDE_INPUT.format(
         problem_statement=problem_statement,
         chain_of_thought=chain_of_thought,
         final_solution=final_solution,
     )
-    result = call_llm(prompt)
+    result = call_llm_api(prompt, model=model)
     return parse_result(result)
+
+
+# Keep old name as alias for backwards compatibility
+segment_chain_of_thought_with_claude = segment_chain_of_thought
+
+
+def call_llm_api(prompt, model):
+    """Route to the correct LLM backend based on model name prefix."""
+    if model.startswith("gemini-"):
+        return call_gemini(prompt, model=model)
+    elif model.startswith("claude-"):
+        return call_claude(prompt, model=model)
+    else:
+        raise ValueError(f"Unknown model prefix in {model!r}. Model must start with 'claude-' or 'gemini-'.")
+
 
 @tenacity.retry(retry=tenacity.retry_if_exception(anthropic.RateLimitError),
                 wait=tenacity.wait_exponential_jitter(),
                 stop=tenacity.stop_after_attempt(5))
-def call_llm(prompt, max_tokens=MAX_TOKENS, thinking_budget=THINKING_BUDGET):
-    model = os.environ.get("MODEL", "claude-sonnet-4-6")
+def call_claude(prompt, model, max_tokens=MAX_TOKENS, thinking_budget=THINKING_BUDGET):
     client = anthropic.Anthropic()
     response = client.messages.create(
         model=model,
@@ -151,12 +170,38 @@ def call_llm(prompt, max_tokens=MAX_TOKENS, thinking_budget=THINKING_BUDGET):
     return ""
 
 
+@tenacity.retry(retry=tenacity.retry_if_exception(lambda e: "429" in str(e) or "ResourceExhausted" in str(e)),
+                wait=tenacity.wait_exponential_jitter(),
+                stop=tenacity.stop_after_attempt(5))
+def call_gemini(prompt, model, max_tokens=MAX_TOKENS):
+    client = genai.Client()
+    
+    response = client.models.generate_content(
+        model=model,
+        contents = [
+            types.Content(
+                role="user",
+                parts=[
+                    types.Part.from_text(text=prompt),
+                ],
+            ),
+        ],
+        config=types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(
+                thinking_level="HIGH"
+            )
+        )
+    )
+    return response.text
+
+
 # --- Claude CLI-based implementation ---
 
 ALLOWED_MODELS = {
     "claude-haiku-4-5-20251001",
     "claude-sonnet-4-6",
     "claude-opus-4-6",
+    "gemini-3.1-pro-preview",
 }
 
 CLI_MAX_RETRIES = int(os.environ.get("CLI_MAX_RETRIES", "5"))
@@ -182,6 +227,9 @@ def call_llm_cli(prompt, model=None, output_file=None, max_retries=CLI_MAX_RETRI
     """
     if model is None:
         model = os.environ.get("CLAUDE_CLI_MODEL", "claude-opus-4-6")
+
+    if model.startswith("gemini-"):
+        raise ValueError(f"CLI method is not supported for Gemini models ({model!r}). Use --method api instead.")
 
     if model not in ALLOWED_MODELS:
         raise ValueError(f"Unknown model {model!r}. Must be one of: {sorted(ALLOWED_MODELS)}")

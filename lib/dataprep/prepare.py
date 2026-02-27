@@ -5,6 +5,7 @@ Usage examples:
     python prepare.py --model claude-opus-4-6 --method cli --offset 0 --limit 100 --mode append
     python prepare.py --model claude-opus-4-6 --method api --offset 0 --limit 100 --mode overwrite
     python prepare.py --model claude-sonnet-4-6 --method cli --offset 0 --limit 50 --mode append --parallelism 8
+    python prepare.py --model gemini-3.1-pro --method api --offset 0 --limit 100 --mode append
 
 Modes:
     append    Load existing HF dataset, skip already-processed records, process the
@@ -111,16 +112,14 @@ def load_existing():
 # ---------------------------------------------------------------------------
 
 def process_with_api(examples, model, parallelism):
-    os.environ["MODEL"] = model
-
     def _segment(x):
         x["hcot_model"] = model
         try:
-            x["hierarchical_cot"], x["hierarchical_cot_raw"] = segment.segment_chain_of_thought_with_claude(
-                x["problem"], x["generated_solution"], x["expected_answer"]
+            x["hierarchical_cot"], x["hierarchical_cot_raw"] = segment.segment_chain_of_thought(
+                x["question"], x["generated_solution"], x["expected_answer"], model=model
             )
         except Exception as e:
-            logger.error("Failed to segment problem %r: %s", x["problem"][:80], e)
+            logger.error("Failed to segment problem %r: %s", x["question"][:80], e)
             x["hierarchical_cot"], x["hierarchical_cot_raw"] = "", ""
         return x
 
@@ -128,6 +127,8 @@ def process_with_api(examples, model, parallelism):
 
 
 def process_with_cli(examples, model, parallelism):
+    if model.startswith("gemini-"):
+        raise ValueError(f"CLI method is not supported for Gemini models ({model!r}). Use --method api instead.")
     raw = [
         {
             "problem_statement": ex["question"],
@@ -164,9 +165,9 @@ def main():
     # Determine which records still need processing.
     if existing is not None:
         done_problems = set(
-            existing.filter(lambda x: bool(x["hierarchical_cot"]))["problem"]
+            existing.filter(lambda x: bool(x["hierarchical_cot"]))["question"]
         )
-        to_process = source.filter(lambda x: x["problem"] not in done_problems)
+        to_process = source.filter(lambda x: x["question"] not in done_problems)
         logger.info(
             "%d already processed, %d remaining to process",
             len(source) - len(to_process),
@@ -191,13 +192,13 @@ def main():
         parts = []
 
         # Existing records outside the current source window → keep untouched.
-        kept_outside = existing.filter(lambda x: x["problem"] not in source_problems)
+        kept_outside = existing.filter(lambda x: x["question"] not in source_problems)
         if len(kept_outside) > 0:
             parts.append(kept_outside)
 
         # Existing records inside the source window that were already done → keep.
         kept_inside = existing.filter(
-            lambda x: x["problem"] in source_problems and bool(x["hierarchical_cot"])
+            lambda x: x["question"] in source_problems and bool(x["hierarchical_cot"])
         )
         if len(kept_inside) > 0:
             parts.append(kept_inside)
