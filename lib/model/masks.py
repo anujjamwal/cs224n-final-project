@@ -47,7 +47,7 @@ def build_min_blocked_q(input_ids, batch_blocks):
     return min_blocked_q
 
 
-def build_position_ids(input_ids, batch_blocks):
+def build_position_ids(input_ids, batch_blocks, padding_mask=None):
     """Build position_ids that simulate contiguous positions after pruning.
 
     During training the hierarchical mask hides the reasoning span
@@ -65,11 +65,20 @@ def build_position_ids(input_ids, batch_blocks):
     after actual pruning.
 
     For multiple blocks, shifts accumulate in sequence order.
+
+    When ``padding_mask`` is provided (1 = real token, 0 = pad), the base
+    positions are derived from its cumulative sum so that padded tokens
+    (whether left- or right-padded) do not consume position slots.
     """
     batch_size, seq_len = input_ids.shape
-    position_ids = torch.arange(
-        seq_len, device=input_ids.device
-    ).unsqueeze(0).expand(batch_size, -1).clone()
+
+    if padding_mask is not None:
+        position_ids = padding_mask.long().cumsum(-1) - 1
+        position_ids.clamp_(min=0)
+    else:
+        position_ids = torch.arange(
+            seq_len, device=input_ids.device
+        ).unsqueeze(0).expand(batch_size, -1).clone()
 
     for b in range(batch_size):
         sorted_blocks = sorted(batch_blocks[b], key=lambda x: x[2])
@@ -173,5 +182,5 @@ class MaterialisedMaskMixin:
         )
         float_mask.masked_fill_(~mask_tensor, torch.finfo(torch.bfloat16).min)
 
-        position_ids = build_position_ids(input_ids, batch_blocks)
+        position_ids = build_position_ids(input_ids, batch_blocks, padding_mask)
         return float_mask, position_ids

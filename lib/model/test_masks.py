@@ -420,6 +420,37 @@ class TestBuildPositionIds:
         # Batch 1: identity (no blocks)
         assert pos[1].tolist() == list(range(7))
 
+    def test_left_padding_no_blocks(self):
+        """Left-padded input with no blocks: real tokens get contiguous positions."""
+        ids = torch.tensor([[0, 0, 1, 2, 3]])
+        padding_mask = torch.tensor([[0, 0, 1, 1, 1]])
+        blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
+        pos = build_position_ids(ids, blocks, padding_mask=padding_mask)
+        # pad positions clamped to 0; real tokens: 0, 1, 2
+        assert pos[0].tolist() == [0, 0, 0, 1, 2]
+
+    def test_right_padding_no_blocks(self):
+        """Right-padded input with no blocks: pad positions freeze at last real pos."""
+        ids = torch.tensor([[1, 2, 3, 0, 0]])
+        padding_mask = torch.tensor([[1, 1, 1, 0, 0]])
+        blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
+        pos = build_position_ids(ids, blocks, padding_mask=padding_mask)
+        # cumsum-1: [0,1,2,2,2]; pad positions stay at 2 (clamped)
+        assert pos[0].tolist() == [0, 1, 2, 2, 2]
+
+    def test_left_padding_with_block(self):
+        """Left-padded input with a reasoning block: shifts applied after cumsum base."""
+        # pad pad 1  [T]  2  [S]  3  [R]  4
+        #  0   1  2   3   4   5   6   7   8
+        ids = torch.tensor([[0, 0, 1, THOUGHT_ID, 2, SOLUTION_ID, 3, RETURN_ID, 4]])
+        padding_mask = torch.tensor([[0, 0, 1, 1, 1, 1, 1, 1, 1]])
+        blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
+        pos = build_position_ids(ids, blocks, padding_mask=padding_mask)
+        # Base from cumsum-1: [0,0, 0,1,2,3,4,5,6]
+        # Block: thought=3, solution=5, span_len=2
+        # Positions 6+ shifted by -2: [0,0, 0,1,2,3, 4-2,5-2,6-2] = [0,0,0,1,2,3,2,3,4]
+        assert pos[0].tolist() == [0, 0, 0, 1, 2, 3, 2, 3, 4]
+
 
 # ---------------------------------------------------------------------------
 # MaterialisedMaskMixin._build_hierarchical_mask_and_position_ids
