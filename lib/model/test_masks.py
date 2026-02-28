@@ -13,6 +13,7 @@ from .masks import (
     MaterialisedMaskMixin,
     extract_cot_blocks,
     build_min_blocked_q,
+    build_position_ids,
 )
 
 # ---------------------------------------------------------------------------
@@ -320,3 +321,141 @@ class TestBuildMinBlockedQ:
         # Other positions remain at seq_len (including [THOUGHT] at pos 1)
         assert mbq[0, 0].item() == seq_len
         assert mbq[0, 1].item() == seq_len
+
+
+# ---------------------------------------------------------------------------
+# build_position_ids
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPositionIds:
+    def test_no_blocks(self):
+        """Without blocks, position_ids should be identity [0, 1, 2, ...]."""
+        ids = torch.tensor([[1, 2, 3, 4, 5]])
+        blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
+        pos = build_position_ids(ids, blocks)
+        expected = torch.arange(5).unsqueeze(0)
+        assert torch.equal(pos, expected)
+
+    def test_single_block(self):
+        """After a single block, tokens beyond solution_pos are shifted back."""
+        # positions:  0   1          2  3         4          5       6
+        ids = torch.tensor([[1, THOUGHT_ID, 2, 3, SOLUTION_ID, 4, RETURN_ID]])
+        blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
+        pos = build_position_ids(ids, blocks)
+        # Block: thought=1, solution=4, return=6
+        # span_len = solution - thought = 4 - 1 = 3
+        # Positions 0..4 unchanged; positions 5,6 shifted by -3
+        assert pos[0, :5].tolist() == [0, 1, 2, 3, 4]
+        assert pos[0, 5].item() == 5 - 3  # = 2
+        assert pos[0, 6].item() == 6 - 3  # = 3
+
+    def test_single_block_with_trailing(self):
+        """Tokens after [RETURN] also get shifted."""
+        # positions:  0   1          2  3         4          5       6          7
+        ids = torch.tensor([[1, THOUGHT_ID, 2, 3, SOLUTION_ID, 4, RETURN_ID, 5]])
+        blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
+        pos = build_position_ids(ids, blocks)
+        # Block: thought=1, solution=4, return=6; span_len=3
+        # Positions 5,6,7 shifted by -3
+        assert pos[0, 7].item() == 7 - 3  # = 4
+
+    def test_multiple_blocks_cumulative_shift(self):
+        """Multiple blocks accumulate position shifts."""
+        # Block 1: positions 1(T) 2 3(S) 4 5(R)
+        # Block 2: positions 7(T) 8 9(S) 10 11(R)
+        # trailing: position 12
+        ids = torch.tensor([[
+            1,              # 0
+            THOUGHT_ID,     # 1
+            2,              # 2
+            SOLUTION_ID,    # 3
+            4,              # 4
+            RETURN_ID,      # 5
+            6,              # 6
+            THOUGHT_ID,     # 7
+            8,              # 8
+            SOLUTION_ID,    # 9
+            10,             # 10
+            RETURN_ID,      # 11
+            12,             # 12
+        ]])
+        blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
+        pos = build_position_ids(ids, blocks)
+
+        # Block 1: thought=1, solution=3, span_len=2
+        # Positions 4+ shifted by -2
+        # Block 2: thought=7, solution=9, span_len=2
+        # Positions 10+ shifted by an additional -2 (total -4)
+
+        # Positions inside block 1 span (2,3): unchanged
+        assert pos[0, 2].item() == 2
+        assert pos[0, 3].item() == 3
+        # Position 4 (solution content, after block 1's solution_pos+1): shifted by -2
+        assert pos[0, 4].item() == 4 - 2  # = 2
+        assert pos[0, 5].item() == 5 - 2  # = 3
+        assert pos[0, 6].item() == 6 - 2  # = 4
+        # Positions inside block 2 span (8,9): shifted by -2 (from block 1)
+        assert pos[0, 8].item() == 8 - 2  # = 6
+        assert pos[0, 9].item() == 9 - 2  # = 7
+        # Positions 10+ shifted by -2 (block 1) -2 (block 2) = -4
+        assert pos[0, 10].item() == 10 - 4  # = 6
+        assert pos[0, 11].item() == 11 - 4  # = 7
+        assert pos[0, 12].item() == 12 - 4  # = 8
+
+    def test_batch_independence(self):
+        """Each batch element has independent position_ids."""
+        ids = torch.tensor([
+            [1, THOUGHT_ID, 2, SOLUTION_ID, 3, RETURN_ID, 4],
+            [1, 2, 3, 4, 5, 6, 7],  # no blocks
+        ])
+        blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
+        pos = build_position_ids(ids, blocks)
+
+        # Batch 0: thought=1, solution=3, span_len=2; positions 4+ shifted by -2
+        assert pos[0, 4].item() == 2
+        assert pos[0, 5].item() == 3
+        assert pos[0, 6].item() == 4
+
+        # Batch 1: identity (no blocks)
+        assert pos[1].tolist() == list(range(7))
+
+
+# ---------------------------------------------------------------------------
+# MaterialisedMaskMixin._build_hierarchical_mask_and_position_ids
+# ---------------------------------------------------------------------------
+
+
+class TestMaterialisedMaskAndPositionIds:
+    def _build(self, input_ids, padding_mask=None):
+        tester = MaterialisedTester()
+        return tester._build_hierarchical_mask_and_position_ids(
+            input_ids, padding_mask=padding_mask
+        )
+
+    def test_returns_tuple(self):
+        ids = torch.tensor([[1, THOUGHT_ID, 2, SOLUTION_ID, 3, RETURN_ID, 4]])
+        result = self._build(ids)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+    def test_mask_matches_plain_method(self):
+        """The mask from the tuple method should match the standalone method."""
+        ids = torch.tensor([[1, THOUGHT_ID, 2, SOLUTION_ID, 3, RETURN_ID, 4]])
+        mask_plain = MaterialisedTester()._build_hierarchical_mask(ids)
+        mask_tuple, _ = self._build(ids)
+        assert torch.equal(mask_plain, mask_tuple)
+
+    def test_position_ids_match_build_fn(self):
+        """position_ids from the tuple method should match build_position_ids."""
+        ids = torch.tensor([[1, THOUGHT_ID, 2, SOLUTION_ID, 3, RETURN_ID, 4]])
+        _, pos = self._build(ids)
+        blocks = extract_cot_blocks(ids, THOUGHT_ID, SOLUTION_ID, RETURN_ID)
+        expected = build_position_ids(ids, blocks)
+        assert torch.equal(pos, expected)
+
+    def test_no_blocks_identity_positions(self):
+        ids = torch.tensor([[1, 2, 3, 4]])
+        _, pos = self._build(ids)
+        expected = torch.arange(4).unsqueeze(0)
+        assert torch.equal(pos, expected)

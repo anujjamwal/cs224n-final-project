@@ -47,6 +47,39 @@ def build_min_blocked_q(input_ids, batch_blocks):
     return min_blocked_q
 
 
+def build_position_ids(input_ids, batch_blocks):
+    """Build position_ids that simulate contiguous positions after pruning.
+
+    During training the hierarchical mask hides the reasoning span
+    (thought_pos+1 … solution_pos) from tokens after the corresponding
+    [RETURN].  But the default sequential position_ids still include the
+    hidden span, creating a train-test mismatch: at inference the pruned
+    sequence has contiguous positions, so the RoPE relative distances
+    differ from what the model saw during training.
+
+    This function assigns position_ids as if each masked reasoning span
+    has been physically removed.  Tokens **inside** the span keep their
+    original positions (they still attend to each other during training).
+    Tokens from solution_pos+1 onward are shifted back by the span length
+    so their RoPE distances to visible tokens match what they would be
+    after actual pruning.
+
+    For multiple blocks, shifts accumulate in sequence order.
+    """
+    batch_size, seq_len = input_ids.shape
+    position_ids = torch.arange(
+        seq_len, device=input_ids.device
+    ).unsqueeze(0).expand(batch_size, -1).clone()
+
+    for b in range(batch_size):
+        sorted_blocks = sorted(batch_blocks[b], key=lambda x: x[2])
+        for thought_pos, solution_pos, return_pos in sorted_blocks:
+            span_len = solution_pos - thought_pos
+            position_ids[b, solution_pos + 1:] -= span_len
+
+    return position_ids
+
+
 class FlexAttentionMaskMixin:
     """Mixin that builds a hierarchical attention mask via FlexAttention.
 
@@ -102,6 +135,17 @@ class MaterialisedMaskMixin:
     """
 
     def _build_hierarchical_mask(self, input_ids, padding_mask=None):
+        mask, _ = self._build_hierarchical_mask_and_position_ids(input_ids, padding_mask)
+        return mask
+
+    def _build_hierarchical_mask_and_position_ids(self, input_ids, padding_mask=None):
+        """Return ``(attention_mask, position_ids)`` for training.
+
+        The attention mask is the standard 4-D materialised causal mask with
+        reasoning spans blocked.  The position_ids tensor assigns contiguous
+        positions as if those spans had been pruned, aligning training-time
+        RoPE distances with inference-time distances after actual pruning.
+        """
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
 
@@ -128,4 +172,6 @@ class MaterialisedMaskMixin:
             batch_size, 1, seq_len, seq_len, dtype=torch.bfloat16, device=device
         )
         float_mask.masked_fill_(~mask_tensor, torch.finfo(torch.bfloat16).min)
-        return float_mask
+
+        position_ids = build_position_ids(input_ids, batch_blocks)
+        return float_mask, position_ids

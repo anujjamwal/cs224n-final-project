@@ -9,7 +9,7 @@ class HCotTrainer(Trainer):
     def __init__(self, attention_mask_func: Callable, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._attention_mask_func = attention_mask_func
-      
+
     def compute_loss(
         self,
         model: nn.Module,
@@ -18,8 +18,13 @@ class HCotTrainer(Trainer):
         num_items_in_batch: torch.Tensor | int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Any]:
         padding_mask = inputs.get('attention_mask', None)
-        attention_mask = self._attention_mask_func(input_ids=inputs["input_ids"], padding_mask=padding_mask)
-        inputs['attention_mask'] = attention_mask
+        result = self._attention_mask_func(input_ids=inputs["input_ids"], padding_mask=padding_mask)
+        # Support both (mask, position_ids) tuple and plain mask for
+        # backward compatibility.
+        if isinstance(result, tuple):
+            inputs['attention_mask'], inputs['position_ids'] = result
+        else:
+            inputs['attention_mask'] = result
         return super().compute_loss(model, inputs, return_outputs, num_items_in_batch)
 
 
