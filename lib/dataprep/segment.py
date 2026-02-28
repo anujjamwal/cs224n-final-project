@@ -177,8 +177,8 @@ def _is_anthropic_rate_limit_error(e):
 
 
 @tenacity.retry(retry=tenacity.retry_if_exception(_is_anthropic_rate_limit_error),
-                wait=tenacity.wait_exponential_jitter(),
-                stop=tenacity.stop_after_attempt(5))
+                wait=tenacity.wait_exponential_jitter(initial=20, jitter=30),
+                stop=tenacity.stop_after_attempt(10))
 def call_claude(prompt, model, max_tokens=MAX_TOKENS, thinking_budget=THINKING_BUDGET):
     if anthropic is None:
         raise ImportError("The 'anthropic' package is not installed. Please install it with 'pip install anthropic' to use Claude models via API.")
@@ -208,8 +208,8 @@ def _is_gemini_retryable_error(e):
 
 
 @tenacity.retry(retry=tenacity.retry_if_exception(_is_gemini_retryable_error),
-                wait=tenacity.wait_exponential_jitter(),
-                stop=tenacity.stop_after_attempt(5))
+                wait=tenacity.wait_exponential_jitter(initial=30, jitter=30),
+                stop=tenacity.stop_after_attempt(10))
 def call_gemini(prompt, model, max_tokens=MAX_TOKENS):
     if genai is None:
         raise ImportError("The 'google-genai' package is not installed. Please install it with 'pip install google-genai' to use Gemini models via API.")

@@ -129,8 +129,9 @@ def process_with_api(examples, model, parallelism, output_dir):
                 x["question"], x["generated_solution"], x["expected_answer"], model=model, output_file=output_file
             )
         except Exception as e:
-            logger.error("Failed to segment problem %r (index %s): %s", x["question"][:80], x["id"], e)
+            logger.error("Failed to segment problem %r (index %s): %s", x["question"], x["id"], e)
             x["hierarchical_cot"], x["hierarchical_cot_raw"] = "", ""
+        
         return x
 
     return examples.map(_segment, with_indices=True, num_proc=parallelism)
@@ -195,6 +196,9 @@ def main():
         else:
             newly_processed = process_with_cli(to_process, args.model, args.parallelism, args.output_dir)
 
+    if newly_processed is not None:
+        newly_processed = newly_processed.filter(lambda x: len(x["hierarchical_cot"]) > 50)
+
     # Build the final dataset to push.
     if args.mode == "append" and existing is not None:
         parts = []
@@ -208,11 +212,14 @@ def main():
         kept_inside = existing.filter(
             lambda x: x["question"] in source_problems and bool(x["hierarchical_cot"])
         )
-        if len(kept_inside) > 0:
-            parts.append(kept_inside)
 
         if newly_processed is not None:
+            newly_processed_questions = set(newly_processed["question"])
+            kept_inside = kept_inside.filter(lambda x: x["question"] not in newly_processed_questions)
             parts.append(newly_processed)
+
+        if len(kept_inside) > 0:
+            parts.append(kept_inside)
 
         if not parts:
             logger.info("Nothing to push.")
