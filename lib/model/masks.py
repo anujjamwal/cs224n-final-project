@@ -1,29 +1,6 @@
 import torch
 from torch import nn
-
-
-def extract_cot_blocks(input_ids, thought_token_id, solution_token_id, return_token_id):
-    """Find [THOUGHT]-[SOLUTION]-[RETURN] triplets in each batch element.
-
-    Returns a list (length = batch_size) of lists of (thought_pos, solution_pos,
-    return_pos) tuples.
-    """
-    batch_size = input_ids.shape[0]
-    batch_blocks = []
-    for b in range(batch_size):
-        tokens = input_ids[b].tolist()
-        stack, blocks = [], []
-        for i, tok in enumerate(tokens):
-            if tok == thought_token_id:
-                stack.append([i, None])
-            elif tok == solution_token_id and stack:
-                stack[-1][1] = i
-            elif tok == return_token_id and stack:
-                thought_pos, solution_pos = stack.pop()
-                if solution_pos is not None:
-                    blocks.append((thought_pos, solution_pos, i))
-        batch_blocks.append(blocks)
-    return batch_blocks
+import utils
 
 
 def build_min_blocked_q(input_ids, batch_blocks):
@@ -60,7 +37,7 @@ class FlexAttentionMaskMixin:
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
 
-        batch_blocks = extract_cot_blocks(
+        batch_blocks = utils.find_cot_blocks(
             input_ids, self.thought_token_id, self.solution_token_id, self.return_token_id
         )
         mbq = build_min_blocked_q(input_ids, batch_blocks)
@@ -101,11 +78,11 @@ class MaterialisedMaskMixin:
     Only feasible for short sequences due to O(seq_len^2) memory.
     """
 
-    def _build_hierarchical_mask(self, input_ids, padding_mask=None):
+    def _build_hierarchical_mask(self, input_ids, padding_mask):
         batch_size, seq_len = input_ids.shape
         device = input_ids.device
 
-        batch_blocks = extract_cot_blocks(
+        batch_blocks = utils.find_cot_blocks(
             input_ids, self.thought_token_id, self.solution_token_id, self.return_token_id
         )
 
@@ -119,8 +96,8 @@ class MaterialisedMaskMixin:
             for thought_pos, solution_pos, return_pos in batch_blocks[b]:
                 # By reduction rule we maintain [THOUGHT] and [RETURN] tokens.
                 mask[return_pos + 1:, thought_pos+1:solution_pos+1] = False
-            if padding_mask is not None:
-                mask = mask & padding_mask[b].bool().unsqueeze(0)
+
+            mask = mask & padding_mask[b].bool().unsqueeze(0)
             masks.append(mask)
 
         mask_tensor = torch.stack(masks).unsqueeze(1)
