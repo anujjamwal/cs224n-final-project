@@ -178,7 +178,7 @@ def _sample(
         last_token = next_tokens.squeeze(-1)
         pos = input_ids.shape[1] - 1 
         for b in (last_token == thought_token_id).nonzero(as_tuple=True)[0].tolist():
-            stacks[b].append((pos, None, None))
+            stacks[b].append([pos, None, None])
 
         for b in (last_token == solution_token_id).nonzero(as_tuple=True)[0].tolist():
             if stacks[b]:
@@ -191,7 +191,7 @@ def _sample(
         return_indices = (last_token == return_token_id).nonzero(as_tuple=True)[0].tolist()
         prune_candidates = [idx for idx in return_indices if stacks[idx]]
 
-        if return_indices:
+        if prune_candidates:
             input_ids, model_kwargs = _prune_model_inputs(
                 model,
                 prune_input_candidates=prune_candidates,
@@ -245,7 +245,6 @@ def generate(model, **kwargs):
     """Custom generate method for Hierarchical Chain of Thought"""
 
     return model.generate(
-        model,
         custom_generate=_sample,
         **kwargs
     )
