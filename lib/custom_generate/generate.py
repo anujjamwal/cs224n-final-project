@@ -227,7 +227,7 @@ def _sample(
         if streamer is not None:
             streamer.put(next_tokens.cpu())
         
-        last_token = next_tokens.squeeze(-1)
+        last_token = next_tokens.view(-1)
         pos = input_ids.shape[1] - 1 
         for b in (last_token == thought_token_id).nonzero(as_tuple=True)[0].tolist():
             stacks[b].append([pos, None, None])
