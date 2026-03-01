@@ -144,6 +144,14 @@ def _sample(
     unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
     stacks = [[] for _ in range(batch_size)]
 
+    # Cap forward steps at max_new_tokens to prevent infinite loops when
+    # pruning reduces the sequence length below the max-length threshold.
+    initial_len = input_ids.shape[1]
+    max_generation_steps = generation_config.max_new_tokens
+    if max_generation_steps is None and generation_config.max_length is not None:
+        max_generation_steps = generation_config.max_length - initial_len
+    num_generated = 0
+
     model_forward = (
         model.get_compiled_call(generation_config.compile_config)
         if GenerationMixin._valid_auto_compile_criteria(model, model_kwargs, generation_config)
@@ -243,8 +251,11 @@ def _sample(
                 model_kwargs=model_kwargs
             )
 
+        num_generated += 1
         unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids, scores) # type: ignore
         this_peer_finished = bool(unfinished_sequences.max() == 0)
+        if max_generation_steps is not None and num_generated >= max_generation_steps:
+            this_peer_finished = True
 
         # This is needed to properly delete outputs.logits which may be very large for first iteration
         # Otherwise a reference to outputs is kept which keeps the logits alive in the next iteration

@@ -59,9 +59,14 @@ def generate(
     # Track which batch elements are still generating
     attention_mask = model_kwargs.pop('attention_mask')
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
-    max_token_length = model_kwargs.get("max_new_tokens", stopping_criteria[0].max_length)
+    max_new_tokens = model_kwargs.pop("max_new_tokens", None)
+    if max_new_tokens is not None:
+        max_token_length = prompt_tokens + max_new_tokens
+    else:
+        max_token_length = stopping_criteria[0].max_length
+        max_new_tokens = max_token_length - prompt_tokens
 
-    while tokens.shape[1] < max_token_length:
+    while tokens.shape[1] < max_token_length and num_generated < max_new_tokens:
         for b in range(batch_size):
             total_tokens_processed[b] += tokens.shape[1]
         num_generated += 1
@@ -192,9 +197,14 @@ def generate_with_mask(
     unfinished = torch.ones(batch_size, dtype=torch.bool, device=input_ids.device)
     has_active_blocks = False
     stacks = [[] for _ in range(batch_size)]
-    max_token_length = model_kwargs.get("max_new_tokens", stopping_criteria[0].max_length)
+    max_new_tokens = model_kwargs.pop("max_new_tokens", None)
+    if max_new_tokens is not None:
+        max_token_length = prompt_tokens + max_new_tokens
+    else:
+        max_token_length = stopping_criteria[0].max_length
+        max_new_tokens = max_token_length - prompt_tokens
 
-    while tokens.shape[1] < max_token_length:
+    while tokens.shape[1] < max_token_length and num_generated < max_new_tokens:
         for b in range(batch_size):
             total_tokens_processed[b] += tokens.shape[1]
         num_generated += 1

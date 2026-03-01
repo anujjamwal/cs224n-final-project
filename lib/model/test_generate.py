@@ -229,6 +229,44 @@ class TestBatchPruning:
         assert 5 in b1
 
 
+class TestPruningTermination:
+    def test_terminates_with_repeated_pruning(self):
+        """Generation must terminate after max_new_tokens forward steps even
+        when pruning keeps resetting the sequence length below max_length.
+
+        Without the fix, pruning reduces tokens.shape[1] so the condition
+        ``tokens.shape[1] < max_token_length`` stays True indefinitely.
+        """
+        # prompt [1] (length 1), max_length=10 → max_new_tokens=9
+        # Each block [THOUGHT, SOLUTION, RETURN] = 3 forward steps, prunes 1 token.
+        # Net growth per block: +2.  Without fix the loop would run ~13 steps.
+        # Provide enough script entries for the unfixed path so the test
+        # would hang rather than IndexError if the fix regresses.
+        block = [[THOUGHT_ID], [SOLUTION_ID], [RETURN_ID]]
+        script_tokens = block * 5  # 15 entries — more than enough
+
+        result = _run(
+            script_tokens=script_tokens,
+            prompt=[[1]],
+            max_length=10,
+        )
+        # Must stop after at most max_new_tokens (9) forward steps
+        assert result.generated_tokens <= 9
+
+    def test_terminates_with_repeated_pruning_masked(self):
+        """Same test for generate_with_mask (min_token_length=0 → always prune)."""
+        block = [[THOUGHT_ID], [SOLUTION_ID], [RETURN_ID]]
+        script_tokens = block * 5
+
+        result = _run_masked(
+            script_tokens=script_tokens,
+            prompt=[[1]],
+            max_length=10,
+            min_token_length=0,
+        )
+        assert result.generated_tokens <= 9
+
+
 class TestLogitsProcessor:
     def test_processor_receives_full_sequence(self):
         """logits_processor should receive the growing token sequence, not just the prompt."""

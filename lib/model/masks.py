@@ -2,6 +2,9 @@ import torch
 from torch import nn
 import utils
 
+# Re-export so that ``from .masks import extract_cot_blocks`` works.
+extract_cot_blocks = utils.find_cot_blocks
+
 
 def build_min_blocked_q(input_ids, batch_blocks):
     """Build the min_blocked_q tensor used by both mask paths.
