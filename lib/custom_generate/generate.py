@@ -59,11 +59,9 @@ def _prune_model_inputs(
     input_ids: torch.LongTensor,
     model_kwargs: dict[str, Any],
 ) -> Tuple[torch.LongTensor, dict[str, Any]]:
-    # Have better logic for position_ids
-    # Document prune aware thing
-    has_position_ids = "position_ids" in model_kwargs
-    position_ids = model_kwargs["position_ids"] if has_position_ids else None
-    prune_location_aware = model_kwargs.get("prune_aware", False)
+    is_prune_agnostic = "position_ids" in model_kwargs and not model_kwargs.get("prune_aware", False)
+    position_ids = model_kwargs["position_ids"] if is_prune_agnostic else None
+
     batch_size = input_ids.shape[0]
     device = input_ids.device
  
@@ -79,20 +77,17 @@ def _prune_model_inputs(
  
     # Build pruned rows per batch element
     new_rows: list[torch.Tensor] = []
-    
-    if has_position_ids:
-        new_position_rows = []
+    if is_prune_agnostic:
+        new_position_rows = list(position_ids)
 
     for b in range(batch_size):
         if b in prune_map:
             thought_pos, solution_pos = prune_map[b]
             new_rows.append(torch.cat((input_ids[b, :thought_pos + 1], input_ids[b, solution_pos + 1:])))
-            if has_position_ids and not prune_location_aware:
-                new_position_rows.append(torch.cat((position_ids[b, :thought_pos + 1], position_ids[b, solution_pos + 1:])))
+            if is_prune_agnostic:
+                new_position_rows[b] = torch.cat((position_ids[b, :thought_pos + 1], position_ids[b, solution_pos + 1:])) # type: ignore 
         else:
             new_rows.append(input_ids[b])
-            if has_position_ids and not prune_location_aware:
-                new_position_rows.append(position_ids[b])
  
     # Pad to uniform length
     max_len = max(r.shape[0] for r in new_rows)
@@ -106,9 +101,9 @@ def _prune_model_inputs(
         new_input_ids[b, :r.shape[0]] = r
         new_attention_mask[b, :r.shape[0]] = 1
     
-    if has_position_ids and not prune_location_aware:
+    if is_prune_agnostic:
         new_position_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
-        for b, p in enumerate(new_position_rows):
+        for b, p in enumerate(new_position_rows): # type: ignore 
             new_position_ids[b, :p.shape[0]] = p
         model_kwargs['position_ids'] = new_position_ids
     else:
@@ -117,6 +112,7 @@ def _prune_model_inputs(
     # Discard the KV cache — the next iteration will re-prefill from scratch
     old_cache = model_kwargs.pop('past_key_values', None)
     del old_cache
+    del position_ids
  
     # Reset cache_position to cover the full pruned sequence so that
     # prepare_inputs_for_generation treats the next forward as a prefill
@@ -138,17 +134,28 @@ def _sample(
     streamer: Optional["BaseStreamer"] = None,
     **model_kwargs,
 ):
-    """Generate the sequence from model using argmax
-    
-    Algorithm:
-    1. Get parameters from model_kwargs for position_ids etc    
-    2. Loop until we hit a stopping criteria
-        2.1 Generate the token
-        2.2 Update the stack if one of 3 tokens
-        2.3 If we got the return token
-            2.3.1 Prune the input_ids
-            2.3.2 Update the position_ids
-            2.3.3 Update or clear the cache
+    """Generate sequences using argmax or sampling from model logits.
+    This function implements the core generation loop for token-by-token sequence generation.
+    It supports both deterministic (argmax) and stochastic (sampling) token selection, and includes
+    special handling for pruning sequences based on custom tokens ([THOUGHT], [SOLUTION], [RETURN]).
+    Args:
+        model: The language model used for generation.
+        input_ids (torch.LongTensor): Initial input token IDs of shape (batch_size, seq_len).
+        logits_processor (LogitsProcessorList): List of processors to apply to logits before sampling.
+        stopping_criteria (StoppingCriteriaList): List of criteria to determine when to stop generation.
+        generation_config (GenerationConfig): Configuration object containing generation parameters.
+        processing_class (Optional[PreTrainedTokenizerBase]): Tokenizer for token-id conversion. Defaults to None.
+        synced_gpus (bool): Whether GPUs are synchronized for multi-device generation. Defaults to False.
+        streamer (Optional[BaseStreamer]): Optional streamer to output tokens during generation. Defaults to None.
+        **model_kwargs: Additional keyword arguments passed to the model forward pass.
+    Returns:
+        torch.LongTensor: Generated sequences of shape (batch_size, seq_len) including input and generated tokens.
+    Notes:
+        - In prune-aware mode, model location_ids are cleared. This allows the the model to regenerate the
+          location_ids and fill the KV Cache. In prune agnostic mode, we retain the location_ids of tokens
+          after pruning.
+        - Handles batch generation with unfinished sequences tracking.
+        - Manages KV-cache through model_kwargs for efficient decoding.
     """
 
     thought_token_id = processing_class.convert_tokens_to_ids("[THOUGHT]")
