@@ -11,10 +11,11 @@ import utils
 
 class HCotSFTTrainer(trainer.sft_trainer.SFTTrainer):
     def __init__(
-        self, 
+        self,
         model: PreTrainedModel,
         args: trainer.sft_config.SFTConfig | TrainingArguments | None = None,
         processing_class: PreTrainedTokenizerBase | ProcessorMixin | None = None,
+        prune_aware: bool = True,
         **kwargs
     ):
         if isinstance(processing_class, ProcessorMixin):
@@ -27,9 +28,10 @@ class HCotSFTTrainer(trainer.sft_trainer.SFTTrainer):
         self.thought_token_id = tokenizer.convert_tokens_to_ids("[THOUGHT]")
         self.solution_token_id = tokenizer.convert_tokens_to_ids("[SOLUTION]")
         self.return_token_id = tokenizer.convert_tokens_to_ids("[RETURN]")
+        self.prune_aware = prune_aware
 
         super().__init__(model, args=args, processing_class=processing_class, **kwargs)
-    
+
 
     def _prepare_attention_mask(self, inputs: dict[str, torch.Tensor|Any]):
         input_ids = inputs['input_ids']
@@ -63,6 +65,87 @@ class HCotSFTTrainer(trainer.sft_trainer.SFTTrainer):
         float_mask.masked_fill_(~mask_tensor, torch.finfo(torch.bfloat16).min)
         return float_mask
 
+    def _compute_loss_staged(
+        self,
+        model: nn.Module,
+        inputs: dict[str, torch.Tensor | Any],
+        return_outputs: bool = False,
+        num_items_in_batch: torch.Tensor | int | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, Any]:
+        """Staged pruning training: multiple forward passes mirroring inference.
+
+        Each pruning event (at [RETURN]) creates a new stage where thought
+        content is physically removed and the model does a fresh forward on
+        the pruned sequence with contiguous positions — exactly matching
+        inference behaviour.
+        """
+        input_ids = inputs['input_ids']
+        labels = inputs.get('labels', input_ids)
+        attention_mask = inputs['attention_mask']
+        batch_size = input_ids.shape[0]
+        device = input_ids.device
+
+        batch_blocks = utils.find_cot_blocks(
+            input_ids, self.thought_token_id, self.solution_token_id, self.return_token_id
+        )
+
+        # Build all stages for every batch element
+        all_stages = []
+        for b in range(batch_size):
+            stages = utils.build_stages(
+                input_ids[b], labels[b], attention_mask[b], batch_blocks[b]
+            )
+            all_stages.append(stages)
+
+        max_num_stages = max(len(s) for s in all_stages)
+
+        total_loss = None
+        first_outputs = None
+        pad_id = getattr(self.processing_class, 'pad_token_id', 0) or 0
+
+        for stage_idx in range(max_num_stages):
+            # Collect sequences from batch elements that participate in this stage
+            participating = []
+            for b in range(batch_size):
+                if stage_idx < len(all_stages[b]):
+                    participating.append(all_stages[b][stage_idx])
+
+            if not participating:
+                continue
+
+            # Pad to uniform length and stack into a batch
+            max_len = max(ids.shape[0] for ids, _, _ in participating)
+            n = len(participating)
+
+            batch_ids = torch.full((n, max_len), pad_id, dtype=input_ids.dtype, device=device)
+            batch_labels = torch.full((n, max_len), -100, dtype=labels.dtype, device=device)
+            batch_mask = torch.zeros((n, max_len), dtype=attention_mask.dtype, device=device)
+
+            for i, (ids, labs, mask) in enumerate(participating):
+                batch_ids[i, :ids.shape[0]] = ids
+                batch_labels[i, :labs.shape[0]] = labs
+                batch_mask[i, :mask.shape[0]] = mask
+
+            stage_inputs: dict[str, torch.Tensor | Any] = {
+                'input_ids': batch_ids,
+                'attention_mask': batch_mask,
+                'labels': batch_labels,
+            }
+            stage_loss, stage_outputs = Trainer.compute_loss(
+                self, model, stage_inputs,
+                return_outputs=True, num_items_in_batch=num_items_in_batch,
+            )
+
+            total_loss = stage_loss if total_loss is None else total_loss + stage_loss
+            if first_outputs is None:
+                first_outputs = stage_outputs
+
+        if total_loss is None:
+            # Edge case: no stages produced (shouldn't happen with valid data)
+            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+
+        return (total_loss, first_outputs) if return_outputs else total_loss
+
     def compute_loss(
         self,
         model: nn.Module,
@@ -71,8 +154,15 @@ class HCotSFTTrainer(trainer.sft_trainer.SFTTrainer):
         num_items_in_batch: torch.Tensor | int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, Any]:
 
+        if self.prune_aware:
+            return self._compute_loss_staged(
+                model, inputs, return_outputs=return_outputs,
+                num_items_in_batch=num_items_in_batch,
+            )
+
+        # Fallback: single-pass with hierarchical attention mask
         inputs['attention_mask'] = self._prepare_attention_mask(inputs)
 
         loss, outputs = Trainer.compute_loss(self, model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch)
-        
+
         return (loss, outputs) if return_outputs else loss
