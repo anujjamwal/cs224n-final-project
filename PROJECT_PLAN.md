@@ -15,15 +15,35 @@ On top of that, We also need to run the benchmarking code to track the actual pr
 
 ## Next Steps
 
-- [ ] Check if there is some bug that is causing the model in absence of attention mask to not produce the eos token.
-- [ ] Check if there is a bug in presence of attention mask that causes the cot to be malformed.
 - [ ] Explore the use of flash attention to speed up inference
-- [ ] Explore the use of Gemini to generate the dataset since we have some credits available. Claude Opus-4.6 is turning out to be too expensive.
 - [ ] Explore some papers on Schema enforcement for models to see if there are some loss methods to train the model to produce better cot structure.
 - [ ] Implement and pass a `NoteTaker` to the `generate` method so instead of discarding, we can save the pruned traces for debugging purposes.
-- [ ] Train a new model with eval to find the overfitting behaviour if present.
+- [ ] Prepare to benchmark with Polymath and AIME24
 
 ## Changelog
+
+### 2026-03-01
+
+#### State
+Positive:
+* We now have a dataset of 1000 hierarchical chain of thought from OpenMathReasoning
+
+Negative:
+
+#### Bugfix / Implementation
+
+* Refactored the code to clean SFTTrainer class that handles training. model/* files are now deprecated and removed.
+* Refactored the generate logic by heavily leaning on transformers GenerationMixin code. Implemented the limited _sample method to generate using sampling. The generation logic now understands the KV cache and RoPE related position ids which are used by Qwen models. On prune during inference, We now prune the location_ids along with input tokens and invalidate the KV cache to ensure the relative positioning is handled correctly.
+* Added support for Gemini API in data preparation and prepared 1000 data points. THis turned out to be wayy cheaper than opus almost 10% the cost.
+* Implement staged compute loss for a new training method for the LLM. In this way, the training data is split into stages
+* Implement two modes in generation, one which resets the position ids and another which retain the position ids. This helps us prepare for AB test on which approach works better for our use case.
+
+#### Experiments
+
+* **A/B Test strategy "Prune Aware" vs "Prune Agnostic" location_ids**
+
+
+#### Outcome
 
 ### 2026-02-26
 

@@ -57,8 +57,13 @@ def _prune_model_inputs(
     prune_input_candidates: Sequence[int],
     prune_input_locations: Sequence[Sequence[Tuple[int, int, int]]],
     input_ids: torch.LongTensor,
-    model_kwargs: dict[str, Any]
+    model_kwargs: dict[str, Any],
 ) -> Tuple[torch.LongTensor, dict[str, Any]]:
+    # Have better logic for position_ids
+    # Document prune aware thing
+    has_position_ids = "position_ids" in model_kwargs
+    position_ids = model_kwargs["position_ids"] if has_position_ids else None
+    prune_location_aware = model_kwargs.get("prune_aware", False)
     batch_size = input_ids.shape[0]
     device = input_ids.device
  
@@ -74,12 +79,20 @@ def _prune_model_inputs(
  
     # Build pruned rows per batch element
     new_rows: list[torch.Tensor] = []
+    
+    if has_position_ids:
+        new_position_rows = []
+
     for b in range(batch_size):
         if b in prune_map:
             thought_pos, solution_pos = prune_map[b]
             new_rows.append(torch.cat((input_ids[b, :thought_pos + 1], input_ids[b, solution_pos + 1:])))
+            if has_position_ids and not prune_location_aware:
+                new_position_rows.append(torch.cat((position_ids[b, :thought_pos + 1], position_ids[b, solution_pos + 1:])))
         else:
             new_rows.append(input_ids[b])
+            if has_position_ids and not prune_location_aware:
+                new_position_rows.append(position_ids[b])
  
     # Pad to uniform length
     max_len = max(r.shape[0] for r in new_rows)
@@ -92,6 +105,14 @@ def _prune_model_inputs(
     for b, r in enumerate(new_rows):
         new_input_ids[b, :r.shape[0]] = r
         new_attention_mask[b, :r.shape[0]] = 1
+    
+    if has_position_ids and not prune_location_aware:
+        new_position_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
+        for b, p in enumerate(new_position_rows):
+            new_position_ids[b, :p.shape[0]] = p
+        model_kwargs['position_ids'] = new_position_ids
+    else:
+        model_kwargs['position_ids'] = None
  
     # Discard the KV cache — the next iteration will re-prefill from scratch
     old_cache = model_kwargs.pop('past_key_values', None)
