@@ -59,7 +59,18 @@ def _prune_model_inputs(
     input_ids: torch.LongTensor,
     model_kwargs: dict[str, Any],
     position_ids: torch.LongTensor | None = None,
+    reset_positions: bool = False,
 ) -> Tuple[torch.LongTensor, dict[str, Any], torch.LongTensor | None]:
+    """Prune thinking tokens from the sequence and update model kwargs.
+
+    When *reset_positions* is ``True`` (Prune Aware mode), any tracked
+    ``position_ids`` are dropped so that the model defaults to contiguous
+    positions on the next re-prefill — matching the pruned training sequences.
+
+    When *reset_positions* is ``False`` (Non Prune Aware mode), the original
+    ``position_ids`` are preserved with gaps so that RoPE distances match the
+    4-D mask training setup.
+    """
     batch_size = input_ids.shape[0]
     device = input_ids.device
 
@@ -73,19 +84,18 @@ def _prune_model_inputs(
     if not prune_map:
         return input_ids, model_kwargs, position_ids
 
-    # Build pruned rows per batch element, applying the same slice to
-    # position_ids so that kept tokens retain their original RoPE positions.
+    # Build pruned rows per batch element
     new_rows: list[torch.Tensor] = []
     new_pos_rows: list[torch.Tensor] = []
     for b in range(batch_size):
         if b in prune_map:
             thought_pos, solution_pos = prune_map[b]
             new_rows.append(torch.cat((input_ids[b, :thought_pos + 1], input_ids[b, solution_pos + 1:])))
-            if position_ids is not None:
+            if position_ids is not None and not reset_positions:
                 new_pos_rows.append(torch.cat((position_ids[b, :thought_pos + 1], position_ids[b, solution_pos + 1:])))
         else:
             new_rows.append(input_ids[b])
-            if position_ids is not None:
+            if position_ids is not None and not reset_positions:
                 new_pos_rows.append(position_ids[b])
 
     # Pad to uniform length
@@ -100,10 +110,12 @@ def _prune_model_inputs(
         new_input_ids[b, :r.shape[0]] = r
         new_attention_mask[b, :r.shape[0]] = 1
 
-    # Preserve original position IDs so RoPE relative distances match training
-    # (training uses attention masking which keeps tokens at original positions).
     new_position_ids = None
-    if position_ids is not None:
+    if reset_positions:
+        # Prune Aware: drop position_ids so model defaults to contiguous
+        model_kwargs.pop('position_ids', None)
+    elif position_ids is not None:
+        # Non Prune Aware: preserve original positions (gaps where thinking was)
         new_position_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
         for b, p in enumerate(new_pos_rows):
             new_position_ids[b, :p.shape[0]] = p
@@ -131,12 +143,13 @@ def _sample(
     processing_class: Optional[PreTrainedTokenizerBase] = None,
     synced_gpus: bool = False,
     streamer: Optional["BaseStreamer"] = None,
+    prune_aware: bool = False,
     **model_kwargs,
 ):
     """Generate the sequence from model using argmax
-    
+
     Algorithm:
-    1. Get parameters from model_kwargs for position_ids etc    
+    1. Get parameters from model_kwargs for position_ids etc
     2. Loop until we hit a stopping criteria
         2.1 Generate the token
         2.2 Update the stack if one of 3 tokens
@@ -144,6 +157,10 @@ def _sample(
             2.3.1 Prune the input_ids
             2.3.2 Update the position_ids
             2.3.3 Update or clear the cache
+
+    When *prune_aware* is True, position IDs are reset to contiguous values
+    after pruning (matching Prune Aware training).  When False, original
+    position IDs are preserved with gaps (matching Non Prune Aware training).
     """
 
     thought_token_id = processing_class.convert_tokens_to_ids("[THOUGHT]")
@@ -154,18 +171,20 @@ def _sample(
     has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
     do_sample = generation_config.do_sample
     scores = ()
-    
+
     batch_size = input_ids.shape[0]
     this_peer_finished: bool = False
     unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
     stacks = [[] for _ in range(batch_size)]
 
-    # Track original position IDs so that after pruning, the kept tokens
-    # retain their original RoPE positions.  During training the 4-D mask
-    # hides pruned tokens while preserving positions; generation must match.
-    full_position_ids = torch.arange(
-        input_ids.shape[1], device=input_ids.device
-    ).unsqueeze(0).expand(batch_size, -1).clone()
+    # Non Prune Aware: track original position IDs so that after pruning the
+    # kept tokens retain their RoPE positions (matches 4-D mask training).
+    # Prune Aware: skip tracking — contiguous positions after pruning.
+    full_position_ids: torch.LongTensor | None = None
+    if not prune_aware:
+        full_position_ids = torch.arange(
+            input_ids.shape[1], device=input_ids.device
+        ).unsqueeze(0).expand(batch_size, -1).clone()
 
     # Cap forward steps at max_new_tokens to prevent infinite loops when
     # pruning reduces the sequence length below the max-length threshold.
@@ -246,9 +265,10 @@ def _sample(
         # update generated ids, model inputs, and length for next step
         input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1) # type: ignore
 
-        # Extend position tracking: new token gets the next sequential position
-        next_pos = full_position_ids[:, -1:] + 1
-        full_position_ids = torch.cat([full_position_ids, next_pos], dim=-1)
+        # Extend position tracking (Non Prune Aware only)
+        if full_position_ids is not None:
+            next_pos = full_position_ids[:, -1:] + 1
+            full_position_ids = torch.cat([full_position_ids, next_pos], dim=-1)
 
         if streamer is not None:
             streamer.put(next_tokens.cpu())
@@ -277,6 +297,7 @@ def _sample(
                 input_ids=input_ids,
                 model_kwargs=model_kwargs,
                 position_ids=full_position_ids,
+                reset_positions=prune_aware,
             )
 
         num_generated += 1
@@ -323,11 +344,25 @@ def _sample(
     return input_ids
 
 
-def generate(model, processing_class = None, **kwargs):
-    """Custom generate method for Hierarchical Chain of Thought"""
+def generate(model, processing_class=None, prune_aware=False, **kwargs):
+    """Custom generate method for Hierarchical Chain of Thought.
+
+    When *prune_aware* is True, position IDs are reset to contiguous values
+    after pruning.  When False, original position IDs are preserved.
+    """
+
+    def _sample_with_config(model_, input_ids, logits_processor, stopping_criteria,
+                            generation_config, processing_class=None,
+                            synced_gpus=False, streamer=None, **mkwargs):
+        return _sample(
+            model_, input_ids, logits_processor, stopping_criteria,
+            generation_config, processing_class=processing_class,
+            synced_gpus=synced_gpus, streamer=streamer,
+            prune_aware=prune_aware, **mkwargs,
+        )
 
     return model.generate(
-        custom_generate=_sample,
+        custom_generate=_sample_with_config,
         processing_class=processing_class,
         **kwargs
     )
