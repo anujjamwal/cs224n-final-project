@@ -43,9 +43,9 @@ def prepare_prune_aware(
     new_attention_masks = []
     new_labels = []
 
-    for cot, output in zip(batch[hcot_key], batch[output_key]):
+    for i in range(len(batch[hcot_key])):
 
-        trl_template = convert_to_trl({hcot_key: cot, output_key: output}, think_key=hcot_key, output_key=output_key)
+        trl_template = convert_to_trl({hcot_key: batch[hcot_key][i], output_key: batch[output_key][i]}, think_key=hcot_key, output_key=output_key)
 
         # Convert to messages ensuring completion is at the end of list
         messages = trl_template["prompt"] + trl_template["completion"]
