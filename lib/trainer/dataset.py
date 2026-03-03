@@ -22,7 +22,7 @@ def convert_to_trl(example, think_key="hierarchical_cot", output_key="expected_a
 
 
 def prepare_prune_aware(
-    dataset: Dataset, 
+    dataset, 
     tokenizer: PreTrainedTokenizer, 
     thought_token="[THOUGHT]", 
     return_token="[RETURN]", 
@@ -43,16 +43,7 @@ def prepare_prune_aware(
     new_attention_masks = []
     new_labels = []
 
-    # The dataset is a batch (dict of lists), get the number of examples
-    # from the length of the first column.
-    if not dataset or not isinstance(dataset, dict) or not any(dataset.values()):
-        return {
-            "input_ids": new_input_ids,
-            "attention_mask": new_attention_masks,
-            "labels": new_labels,
-        }
-
-    num_examples = len(dataset[list(dataset.keys())[0]])
+    num_examples = len(dataset[hcot_key])
 
     for i in range(num_examples):
         # Reconstruct the i-th example from the batch
