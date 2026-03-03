@@ -57,7 +57,7 @@ def _prune_model_inputs(
     prune_input_candidates: Sequence[int],
     prune_input_locations: Sequence[Sequence[Tuple[int, int, int]]],
     input_ids: torch.LongTensor,
-    prune_aware: bool = False,
+    prune_aware: bool,
     model_kwargs: dict[str, Any],
 ) -> Tuple[torch.LongTensor, dict[str, Any]]:
     is_prune_agnostic = "position_ids" in model_kwargs and not model_kwargs.get("prune_aware", False)
