@@ -4,6 +4,8 @@ import torch
 from datasets import Dataset
 from transformers import PreTrainedTokenizer
 
+from . import utils
+
 
 def convert_to_trl(example, think_key="hierarchical_cot", output_key="expected_answer"):
     prompt = "Solve the following math problem. Make sure to put the answer (and only answer) inside \\boxed{}."
@@ -38,15 +40,33 @@ def prepare_prune_aware(
     seen tokens, we set their label to -100 so the loss is not computed on
     these."""
 
-    for example in dataset:
+    new_input_ids = []
+    new_attention_masks = []
+    new_labels = []
+
+    # The dataset is a batch (dict of lists), get the number of examples
+    # from the length of the first column.
+    if not dataset or not isinstance(dataset, dict) or not any(dataset.values()):
+        return {
+            "input_ids": new_input_ids,
+            "attention_mask": new_attention_masks,
+            "labels": new_labels,
+        }
+
+    num_examples = len(dataset[list(dataset.keys())[0]])
+
+    for i in range(num_examples):
+        # Reconstruct the i-th example from the batch
+        example = {key: dataset[key][i] for key in dataset}
+
         trl_template = convert_to_trl(example, think_key=hcot_key, output_key=output_key)
 
         # Convert to messages ensuring completion is at the end of list
         messages = trl_template["prompt"] + trl_template["completion"]
         tokenized = tokenizer.apply_chat_template(
-            messages, 
-            tokenize=True, 
-            add_generation_prompt=False, 
+            messages,
+            tokenize=True,
+            add_generation_prompt=False,
             return_dict=True
         )
 
@@ -56,8 +76,8 @@ def prepare_prune_aware(
 
         # Mask prompt
         prompt_tokenized = tokenizer.apply_chat_template(
-            trl_template["prompt"], 
-            tokenize=True, 
+            trl_template["prompt"],
+            tokenize=True,
             add_generation_prompt=True
         )
         prompt_len = len(prompt_tokenized)
@@ -65,27 +85,27 @@ def prepare_prune_aware(
 
         # Prepare for stages from the hierarchical COT
         batch_blocks = utils.find_cot_blocks(
-            input_ids.unsqueeze(0), 
+            input_ids.unsqueeze(0),
             tokenizer.convert_tokens_to_ids(thought_token),
             tokenizer.convert_tokens_to_ids(solution_token),
             tokenizer.convert_tokens_to_ids(return_token)
         )[0]
 
         stages = utils.build_stages(input_ids, labels, attention_mask, batch_blocks)
-        
+
         previous_length = 0
         for stage_ids, stage_labs, stage_mask in stages:
             stage_labs = stage_labs.clone()
-            
+
             # Mask out the prefill context from previous stages
             if previous_length > 0:
                 mask_len = min(previous_length, stage_labs.shape[0])
                 stage_labs[:mask_len] = mask
-            
+
             new_input_ids.append(stage_ids.tolist())
             new_attention_masks.append(stage_mask.tolist())
             new_labels.append(stage_labs.tolist())
-            
+
             previous_length = stage_ids.shape[0]
 
     return {
