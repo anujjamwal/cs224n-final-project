@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 
 
@@ -23,8 +25,9 @@ def prepare_prune_aware(
     return_token="[RETURN]", 
     solution_token="[SOLUTION]",
     hcot_key="hierarchical_cot",
+    output_key="expected_answer",
     mask=-100
-):
+) -> dict[str, Any]:
     """Take a batch of input sequences and breaks them into stages.
     
     In order to perform prune aware training, we need to split the dataset
@@ -34,7 +37,7 @@ def prepare_prune_aware(
     these."""
 
     for example in dataset:
-        trl_template = convert_to_trl(example)
+        trl_template = convert_to_trl(example, think_key=hcot_key, output_key=output_key)
 
         # Convert to messages ensuring completion is at the end of list
         messages = trl_template["prompt"] + trl_template["completion"]
