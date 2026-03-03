@@ -44,6 +44,7 @@ def prepare_prune_aware(
     new_labels = []
 
     num_examples = len(dataset[hcot_key])
+    print(num_examples)
 
     for i in range(num_examples):
         # Reconstruct the i-th example from the batch
