@@ -42,6 +42,9 @@ def prepare_prune_aware(
     new_input_ids = []
     new_attention_masks = []
     new_labels = []
+    
+    print(">>>>> %d", len(batch[hcot_key]))
+    print(">>>>> %s", batch[hcot_key][0])
 
     for i in range(len(batch[hcot_key])):
 
