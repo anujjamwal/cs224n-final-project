@@ -57,6 +57,7 @@ def _prune_model_inputs(
     prune_input_candidates: Sequence[int],
     prune_input_locations: Sequence[Sequence[Tuple[int, int, int]]],
     input_ids: torch.LongTensor,
+    prune_aware: bool = False,
     model_kwargs: dict[str, Any],
 ) -> Tuple[torch.LongTensor, dict[str, Any]]:
     is_prune_agnostic = "position_ids" in model_kwargs and not model_kwargs.get("prune_aware", False)
@@ -132,6 +133,7 @@ def _sample(
     processing_class: Optional[PreTrainedTokenizerBase] = None,
     synced_gpus: bool = False,
     streamer: Optional["BaseStreamer"] = None,
+    prune_aware: bool = False,
     **model_kwargs,
 ):
     """Generate sequences using argmax or sampling from model logits.
@@ -268,6 +270,7 @@ def _sample(
                 prune_input_candidates=prune_candidates,
                 prune_input_locations=[[stacks[b].pop()] for b in prune_candidates],
                 input_ids=input_ids,
+                prune_aware=prune_aware,
                 model_kwargs=model_kwargs
             )
 
