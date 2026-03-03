@@ -3,7 +3,7 @@ from typing import Any, Optional, Sequence, Tuple
 import torch
 from torch import nn
 from transformers import AutoProcessor, Cache, LogitsProcessorList, PreTrainedModel, ProcessorMixin, StoppingCriteriaList
-from transformers.generation.utils import GenerationMixin
+from transformers.generation.utils import GenerationMixin, ALL_CACHE_NAMES, GenerateEncoderDecoderOutput, GenerateDecoderOnlyOutput
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.generation.streamers import BaseStreamer
 from transformers.utils.generic import ModelOutput
@@ -165,9 +165,19 @@ def _sample(
     return_token_id = processing_class.convert_tokens_to_ids("[RETURN]")
 
     pad_token_id = generation_config._pad_token_tensor # type: ignore
+    output_attentions = generation_config.output_attentions
+    output_hidden_states = generation_config.output_hidden_states
+    output_scores = generation_config.output_scores
+    output_logits = generation_config.output_logits
+    return_dict_in_generate = generation_config.return_dict_in_generate
     has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
     do_sample = generation_config.do_sample
-    scores = ()
+    
+    scores = () if (return_dict_in_generate and output_scores) else None
+    raw_logits = () if (return_dict_in_generate and output_logits) else None
+    decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
+    cross_attentions = () if (return_dict_in_generate and output_attentions) else None
+    decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
     
     batch_size = input_ids.shape[0]
     this_peer_finished: bool = False
@@ -212,24 +222,24 @@ def _sample(
         next_token_scores = logits_processor(input_ids, next_token_logits)
 
         # Store scores, attentions and hidden_states when required
-        # if return_dict_in_generate:
-        #     if output_scores:
-        #         scores += (next_token_scores,)
-        #     if output_logits:
-        #         raw_logits += (next_token_logits,)
-        #     if output_attentions:
-        #         decoder_attentions += (
-        #             (outputs.decoder_attentions,) if self.config.is_encoder_decoder else (outputs.attentions,)
-        #         )
-        #         if self.config.is_encoder_decoder:
-        #             cross_attentions += (outputs.cross_attentions,)
+        if return_dict_in_generate:
+            if output_scores:
+                scores += (next_token_scores,)
+            if output_logits:
+                raw_logits += (next_token_logits,)
+            if output_attentions:
+                decoder_attentions += (
+                    (outputs.decoder_attentions,) if model.config.is_encoder_decoder else (outputs.attentions,)
+                )
+                if model.config.is_encoder_decoder:
+                    cross_attentions += (outputs.cross_attentions,)
 
-        #     if output_hidden_states:
-        #         decoder_hidden_states += (
-        #             (outputs.decoder_hidden_states,)
-        #             if self.config.is_encoder_decoder
-        #             else (outputs.hidden_states,)
-        #         )
+            if output_hidden_states:
+                decoder_hidden_states += (
+                    (outputs.decoder_hidden_states,)
+                    if model.config.is_encoder_decoder
+                    else (outputs.hidden_states,)
+                )
 
         # token selection
         if do_sample:
@@ -284,35 +294,34 @@ def _sample(
     if streamer is not None:
         streamer.end()
 
-    # if return_dict_in_generate:
-    #     cache = None
-    #     if any(cache_key in model_kwargs for cache_key in ALL_CACHE_NAMES):
-    #         cache_key = next(cache_key for cache_key in ALL_CACHE_NAMES if cache_key in model_kwargs)
-    #         cache = model_kwargs[cache_key]
-    #     if self.config.is_encoder_decoder:
-    #         return GenerateEncoderDecoderOutput(
-    #             sequences=input_ids,
-    #             scores=scores,
-    #             logits=raw_logits,
-    #             encoder_attentions=encoder_attentions,
-    #             encoder_hidden_states=encoder_hidden_states,
-    #             decoder_attentions=decoder_attentions,
-    #             cross_attentions=cross_attentions,
-    #             decoder_hidden_states=decoder_hidden_states,
-    #             past_key_values=cache,
-    #         )
-    #     else:
-    #         return GenerateDecoderOnlyOutput(
-    #             sequences=input_ids,
-    #             scores=scores,
-    #             logits=raw_logits,
-    #             attentions=decoder_attentions,
-    #             hidden_states=decoder_hidden_states,
-    #             past_key_values=cache,
-    #         )
-    # else:
-    #     return input_ids
-    return input_ids
+    if return_dict_in_generate:
+        cache = None
+        if any(cache_key in model_kwargs for cache_key in ALL_CACHE_NAMES):
+            cache_key = next(cache_key for cache_key in ALL_CACHE_NAMES if cache_key in model_kwargs)
+            cache = model_kwargs[cache_key]
+        if model.config.is_encoder_decoder:
+            return GenerateEncoderDecoderOutput(
+                sequences=input_ids,
+                scores=scores,
+                logits=raw_logits,
+                encoder_attentions=encoder_attentions,
+                encoder_hidden_states=encoder_hidden_states,
+                decoder_attentions=decoder_attentions,
+                cross_attentions=cross_attentions,
+                decoder_hidden_states=decoder_hidden_states,
+                past_key_values=cache,
+            )
+        else:
+            return GenerateDecoderOnlyOutput(
+                sequences=input_ids,
+                scores=scores,
+                logits=raw_logits,
+                attentions=decoder_attentions,
+                hidden_states=decoder_hidden_states,
+                past_key_values=cache,
+            )
+    else:
+        return input_ids
 
 
 def generate(model, processing_class = None, **kwargs):
