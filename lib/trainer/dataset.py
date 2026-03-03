@@ -4,8 +4,7 @@ import torch
 from datasets import Dataset
 from transformers import PreTrainedTokenizer
 
-from . import utils
-
+import utils
 
 def convert_to_trl(example, think_key="hierarchical_cot", output_key="expected_answer"):
     prompt = "Solve the following math problem. Make sure to put the answer (and only answer) inside \\boxed{}."
