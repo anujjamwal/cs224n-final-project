@@ -1,6 +1,8 @@
 from typing import Any
 
 import torch
+from datasets import Dataset
+from transformers import PreTrainedTokenizer
 
 
 def convert_to_trl(example, think_key="hierarchical_cot", output_key="expected_answer"):
@@ -19,8 +21,8 @@ def convert_to_trl(example, think_key="hierarchical_cot", output_key="expected_a
 
 
 def prepare_prune_aware(
-    dataset, 
-    tokenizer, 
+    dataset: Dataset, 
+    tokenizer: PreTrainedTokenizer, 
     thought_token="[THOUGHT]", 
     return_token="[RETURN]", 
     solution_token="[SOLUTION]",
@@ -36,8 +38,8 @@ def prepare_prune_aware(
     seen tokens, we set their label to -100 so the loss is not computed on
     these."""
 
-    for example in dataset:
-        trl_template = convert_to_trl(example, think_key=hcot_key, output_key=output_key)
+    for i in range(len(dataset)):
+        trl_template = convert_to_trl(dataset[i], think_key=hcot_key, output_key=output_key)
 
         # Convert to messages ensuring completion is at the end of list
         messages = trl_template["prompt"] + trl_template["completion"]
