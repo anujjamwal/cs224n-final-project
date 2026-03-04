@@ -72,7 +72,7 @@ def load_math(
     for idx, row in enumerate(ds):
         if level_strings and row["level"] not in level_strings:
             continue
-        if subject_set and row["type"] not in subject_set:
+        if subject_set and row["subject"] not in subject_set:
             continue
 
         answer = _extract_boxed(row["solution"])
@@ -85,7 +85,7 @@ def load_math(
             expected_answer=answer,
             metadata={
                 "level": row["level"],
-                "subject": row["type"],
+                "subject": row["subject"],
                 "solution": row["solution"],
             },
         ))
