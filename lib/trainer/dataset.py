@@ -6,14 +6,14 @@ from transformers import PreTrainedTokenizer
 
 import utils
 
-def convert_to_trl(example, think_key="hierarchical_cot", output_key="expected_answer"):
+def convert_to_trl(example, think_key="hierarchical_cot", output_key="expected_answer", question_key="question"):
     prompt = "Solve the following math problem. Make sure to put the answer (and only answer) inside \\boxed{}."
     assistant_content = f"<think>\n{example[think_key]}\n</think>\n\\boxed{{{example[output_key]}}}"
     
     return {
         "prompt": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": example["question"]},
+            {"role": "user", "content": example[question_key]},
         ],
         "completion": [
             {"role": "assistant", "content": assistant_content},
@@ -27,8 +27,6 @@ def prepare_prune_aware(
     thought_token="[THOUGHT]", 
     return_token="[RETURN]", 
     solution_token="[SOLUTION]",
-    hcot_key="hierarchical_cot",
-    output_key="expected_answer",
     mask=-100
 ) -> dict[str, Any]:
     """Take a batch of input sequences and breaks them into stages.
@@ -43,16 +41,9 @@ def prepare_prune_aware(
     new_attention_masks = []
     new_labels = []
 
-    for i in range(len(batch[hcot_key])):
-
-        trl_template = convert_to_trl({
-            hcot_key: batch[hcot_key][i],
-            output_key: batch[output_key][i],
-            "question": batch["question"][i]
-        }, think_key=hcot_key, output_key=output_key)
-
+    for i in range(len(batch["prompt"])):
         # Convert to messages ensuring completion is at the end of list
-        messages = trl_template["prompt"] + trl_template["completion"]
+        messages = batch["prompt"][i] + batch["completion"][i]
         tokenized = tokenizer.apply_chat_template(
             messages,
             tokenize=True,
@@ -66,7 +57,7 @@ def prepare_prune_aware(
 
         # Mask prompt
         prompt_tokenized = tokenizer.apply_chat_template(
-            trl_template["prompt"],
+            batch["prompt"][i],
             tokenize=True,
             add_generation_prompt=True
         )
@@ -83,20 +74,10 @@ def prepare_prune_aware(
 
         stages = utils.build_stages(input_ids, labels, attention_mask, batch_blocks)
 
-        previous_length = 0
         for stage_ids, stage_labs, stage_mask in stages:
-            stage_labs = stage_labs.clone()
-
-            # Mask out the prefill context from previous stages
-            if previous_length > 0:
-                mask_len = min(previous_length, stage_labs.shape[0])
-                stage_labs[:mask_len] = mask
-
             new_input_ids.append(stage_ids.tolist())
             new_attention_masks.append(stage_mask.tolist())
             new_labels.append(stage_labs.tolist())
-
-            previous_length = stage_ids.shape[0]
 
     return {
         "input_ids": new_input_ids,

@@ -25,7 +25,7 @@ def find_cot_blocks(input_ids, start_token_id, mid_token_id, end_token_id):
     return batch_blocks
 
 
-def build_stages(input_ids_b, labels_b, attention_mask_b, blocks):
+def build_stages(input_ids_b, labels_b, attention_mask_b, blocks, label_mask=-100):
     """Build staged pruned sequences for a single batch element.
 
     Simulates inference execution where thought content is physically pruned
@@ -77,12 +77,12 @@ def build_stages(input_ids_b, labels_b, attention_mask_b, blocks):
         loss_end = sorted_blocks[stage_idx][2] if stage_idx < n_blocks else seq_len - 1
 
         # Labels: keep original label only within the loss range for this stage
-        pruned_labels = torch.full_like(pruned_ids, -100)
+        pruned_labels = torch.full_like(pruned_ids, label_mask)
         for j, orig_p in enumerate(kept):
             if loss_start <= orig_p <= loss_end:
                 pruned_labels[j] = labels_b[orig_p]
 
-        if (pruned_labels != -100).any():
+        if (pruned_labels != label_mask).any():
             stages.append((pruned_ids, pruned_labels, pruned_mask))
 
     return stages

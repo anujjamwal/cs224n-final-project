@@ -49,6 +49,15 @@ def _update_model_kwargs_for_generation(
         num_new_tokens=num_new_tokens
     )
 
+    # HF's _update_model_kwargs_for_generation does not manage position_ids.
+    # For prune-agnostic mode we track position_ids explicitly after each
+    # prune event so that RoPE positions match training.  Extend the tensor
+    # by one (next position = last + 1) so that prepare_inputs_for_generation
+    # can slice the correct value for the next decode step.
+    if "position_ids" in model_kwargs and model_kwargs["position_ids"] is not None:
+        pos = model_kwargs["position_ids"]
+        model_kwargs["position_ids"] = torch.cat([pos, pos[:, -1:] + 1], dim=-1)
+
     return model_kwargs
 
 
@@ -60,66 +69,79 @@ def _prune_model_inputs(
     prune_aware: bool,
     model_kwargs: dict[str, Any],
 ) -> Tuple[torch.LongTensor, dict[str, Any]]:
-    is_prune_agnostic = "position_ids" in model_kwargs and not prune_aware
-    position_ids = model_kwargs["position_ids"] if is_prune_agnostic else None
+    is_prune_agnostic = not prune_aware
 
     batch_size = input_ids.shape[0]
     device = input_ids.device
- 
+
+    if is_prune_agnostic:
+        # Construct position_ids from model_kwargs if already tracked,
+        # otherwise build contiguous positions (correct before first prune).
+        if "position_ids" in model_kwargs and model_kwargs["position_ids"] is not None:
+            position_ids = model_kwargs["position_ids"]
+        else:
+            position_ids = torch.arange(
+                input_ids.shape[1], device=device
+            ).unsqueeze(0).expand(batch_size, -1)
+    else:
+        position_ids = None
+
     # Map batch index → (thought_pos, solution_pos) for valid prune targets
     prune_map: dict[int, Tuple[int, int]] = {}
     for cand_idx, batch_idx in enumerate(prune_input_candidates):
         for thought_pos, solution_pos, _return_pos in prune_input_locations[cand_idx]:
             if solution_pos is not None:
                 prune_map[batch_idx] = (thought_pos, solution_pos)
- 
+
     if not prune_map:
         return input_ids, model_kwargs
- 
+
     # Build pruned rows per batch element
     new_rows: list[torch.Tensor] = []
     if is_prune_agnostic:
-        new_position_rows = list(position_ids)
+        new_position_rows: list[torch.Tensor] = list(
+            position_ids[b] for b in range(batch_size)  # type: ignore
+        )
 
     for b in range(batch_size):
         if b in prune_map:
             thought_pos, solution_pos = prune_map[b]
             new_rows.append(torch.cat((input_ids[b, :thought_pos + 1], input_ids[b, solution_pos + 1:])))
             if is_prune_agnostic:
-                new_position_rows[b] = torch.cat((position_ids[b, :thought_pos + 1], position_ids[b, solution_pos + 1:])) # type: ignore 
+                new_position_rows[b] = torch.cat((position_ids[b, :thought_pos + 1], position_ids[b, solution_pos + 1:])) # type: ignore
         else:
             new_rows.append(input_ids[b])
- 
+
     # Pad to uniform length
     max_len = max(r.shape[0] for r in new_rows)
     pad_id = getattr(model.config, 'pad_token_id', None)
     if pad_id is None:
         pad_id = getattr(model.config, 'eos_token_id', 0)
- 
+
     new_input_ids = torch.full((batch_size, max_len), pad_id, dtype=input_ids.dtype, device=device)
     new_attention_mask = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
     for b, r in enumerate(new_rows):
         new_input_ids[b, :r.shape[0]] = r
         new_attention_mask[b, :r.shape[0]] = 1
-    
+
     if is_prune_agnostic:
         new_position_ids = torch.zeros((batch_size, max_len), dtype=torch.long, device=device)
-        for b, p in enumerate(new_position_rows): # type: ignore 
+        for b, p in enumerate(new_position_rows):
             new_position_ids[b, :p.shape[0]] = p
         model_kwargs['position_ids'] = new_position_ids
     else:
         model_kwargs['position_ids'] = None
- 
+
     # Discard the KV cache — the next iteration will re-prefill from scratch
     old_cache = model_kwargs.pop('past_key_values', None)
     del old_cache
     del position_ids
- 
+
     # Reset cache_position to cover the full pruned sequence so that
     # prepare_inputs_for_generation treats the next forward as a prefill
     model_kwargs['cache_position'] = torch.arange(max_len, dtype=torch.int64, device=device)
     model_kwargs['attention_mask'] = new_attention_mask
- 
+
     return new_input_ids, model_kwargs # type: ignore
  
 
