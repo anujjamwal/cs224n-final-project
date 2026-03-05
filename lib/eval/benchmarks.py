@@ -95,3 +95,55 @@ def load_math(
         ))
 
     return problems
+
+
+# Polymath difficulty level ordering (top = easiest, low = hardest)
+POLYMATH_LEVELS = ("top", "high", "medium", "low")
+
+
+def load_polymath(
+    language: str = "en",
+    *,
+    dataset_id: str = "Qwen/PolyMath",
+    levels: list[str] | None = None,
+) -> list[EvalProblem]:
+    """Load the Qwen/PolyMath benchmark and return a list of :class:`EvalProblem`.
+
+    PolyMath is a multilingual mathematical reasoning benchmark with 18
+    languages, 4 difficulty levels, and 500 problems per language.
+
+    Parameters
+    ----------
+    language:
+        Language config to load (e.g. ``"en"``, ``"zh"``, ``"fr"``).
+        Defaults to ``"en"`` (English).
+    dataset_id:
+        HuggingFace dataset identifier.  Override if using a mirror.
+    levels:
+        Optional filter — keep only these difficulty levels.
+        Valid values: ``"top"`` (easiest), ``"high"``, ``"medium"``,
+        ``"low"`` (hardest).
+    """
+    ds = load_dataset(dataset_id, language)
+
+    level_set = set(levels) if levels else None
+
+    problems: list[EvalProblem] = []
+    for split_name in POLYMATH_LEVELS:
+        if level_set and split_name not in level_set:
+            continue
+        if split_name not in ds:
+            continue
+        for row in ds[split_name]:
+            problems.append(EvalProblem(
+                id=row["id"],
+                problem=row["question"],
+                expected_answer=row["answer"].strip(),
+                metadata={
+                    "level": split_name,
+                    "subject": "math",
+                    "language": language,
+                },
+            ))
+
+    return problems
