@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from eval import load_math, run_eval, summarize_results
+from eval import MathBenchmark, run_eval, summarize_results
 from eval.runner import GenerationMode
 from custom_generate.generate import _sample
 from trainer import prepare_base_model
@@ -94,9 +94,11 @@ def main():
 
     model.eval()
 
+    benchmark = MathBenchmark()
+
     logger.info("Loading MATH dataset (split=%s, dataset=%s)", args.split, args.dataset_id)
-    problems = load_math(
-        args.split,
+    problems = benchmark.load(
+        split=args.split,
         dataset_id=args.dataset_id,
         subjects=args.subjects,
         levels=args.levels,
@@ -107,6 +109,7 @@ def main():
 
     results = run_eval(
         model, tokenizer, problems, args.output_dir, modes,
+        benchmark=benchmark,
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
     )

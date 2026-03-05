@@ -18,12 +18,11 @@ from typing import Any, Callable
 import torch
 from tqdm.auto import tqdm
 
-from .benchmarks import EvalProblem
-from .judge import check_answer, extract_answer
+from .benchmarks import Benchmark, EvalProblem
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = (
+DEFAULT_SYSTEM_PROMPT = (
     "Solve the following math problem. "
     "Make sure to put the answer (and only answer) inside \\boxed{}."
 )
@@ -137,9 +136,9 @@ def _save_summary(output_dir: str, results: list[EvalResult]) -> None:
 # Tokenization helpers
 # ---------------------------------------------------------------------------
 
-def _build_prompt_messages(problem: EvalProblem) -> list[dict]:
+def _build_prompt_messages(problem: EvalProblem, system_prompt: str) -> list[dict]:
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": problem.problem},
     ]
 
@@ -189,6 +188,7 @@ def run_eval(
     output_dir: str,
     modes: list[GenerationMode],
     *,
+    benchmark: Benchmark | None = None,
     batch_size: int = 4,
     max_new_tokens: int = 4096,
 ) -> list[EvalResult]:
@@ -208,6 +208,10 @@ def run_eval(
         List of :class:`GenerationMode`.  Each problem is evaluated once
         per mode.  Set ``generate_fn=None`` for standard HF generation;
         otherwise pass e.g. ``custom_generate._sample``.
+    benchmark:
+        A :class:`Benchmark` instance that provides ``extract_answer``,
+        ``check_answer``, and ``system_prompt``.  When ``None``, falls
+        back to a default boxed-extraction with ``math-verify``.
     batch_size:
         Number of problems per forward batch.
     max_new_tokens:
@@ -219,8 +223,20 @@ def run_eval(
     """
     os.makedirs(output_dir, exist_ok=True)
 
+    # Resolve benchmark-specific functions, falling back to defaults.
+    if benchmark is not None:
+        _extract = benchmark.extract_answer
+        _check = benchmark.check_answer
+        system_prompt = benchmark.system_prompt
+    else:
+        from .benchmarks import check_answer_math_verify, extract_boxed_last
+        _extract = extract_boxed_last
+        _check = check_answer_math_verify
+        system_prompt = DEFAULT_SYSTEM_PROMPT
+
     # Save config
     config = {
+        "benchmark": benchmark.name if benchmark else "unknown",
         "num_problems": len(problems),
         "modes": [m.name for m in modes],
         "batch_size": batch_size,
@@ -252,7 +268,7 @@ def run_eval(
             total=(len(pending) + batch_size - 1) // batch_size,
         ):
             batch = pending[batch_start : batch_start + batch_size]
-            prompts = [_build_prompt_messages(p) for p in batch]
+            prompts = [_build_prompt_messages(p, system_prompt) for p in batch]
             inp = _batch_tokenize(tokenizer, prompts, device)
 
             gen_kwargs: dict[str, Any] = {
@@ -273,8 +289,8 @@ def run_eval(
             batch_results: list[EvalResult] = []
             for j, prob in enumerate(batch):
                 decoded = tokenizer.decode(sequences[j], skip_special_tokens=False)
-                predicted = extract_answer(decoded)
-                correct = check_answer(predicted, prob.expected_answer)
+                predicted = _extract(decoded)
+                correct = _check(predicted, prob.expected_answer)
 
                 batch_results.append(EvalResult(
                     problem_id=prob.id,

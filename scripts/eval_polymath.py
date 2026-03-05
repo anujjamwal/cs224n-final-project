@@ -41,7 +41,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from eval import load_polymath, run_eval, summarize_results
+from eval import PolyMathBenchmark, run_eval, summarize_results
 from eval.runner import GenerationMode
 from custom_generate.generate import _sample
 from trainer import prepare_base_model
@@ -97,9 +97,11 @@ def main():
 
     model.eval()
 
+    benchmark = PolyMathBenchmark()
+
     logger.info("Loading PolyMath dataset (language=%s, dataset=%s)", args.language, args.dataset_id)
-    problems = load_polymath(
-        args.language,
+    problems = benchmark.load(
+        language=args.language,
         dataset_id=args.dataset_id,
         levels=args.levels,
     )
@@ -109,6 +111,7 @@ def main():
 
     results = run_eval(
         model, tokenizer, problems, args.output_dir, modes,
+        benchmark=benchmark,
         batch_size=args.batch_size,
         max_new_tokens=args.max_new_tokens,
     )
