@@ -2,13 +2,115 @@ from typing import Any, Optional, Sequence, Tuple
 
 import torch
 from torch import nn
-from transformers import  Cache, LogitsProcessorList, StoppingCriteriaList
+from transformers import  Cache, DynamicCache, LogitsProcessorList, StoppingCriteriaList
 from transformers.generation.utils import GenerationMixin, ALL_CACHE_NAMES, GenerateEncoderDecoderOutput, GenerateDecoderOnlyOutput
 from transformers.generation.configuration_utils import GenerationConfig
 from transformers.generation.streamers import BaseStreamer
 from transformers.utils.generic import ModelOutput
 from transformers import PreTrainedTokenizerBase
 
+
+# ---------------------------------------------------------------------------
+# KV-cache manipulation
+# ---------------------------------------------------------------------------
+
+def _retain_and_prune_kv_cache(
+    cache: DynamicCache,
+    prune_map: dict[int, Tuple[int, int]],
+    batch_size: int,
+    old_seq_len: int,
+) -> int:
+    """Modify a DynamicCache in-place after a pruning event.
+
+    For each pruned batch element the function keeps only the prefix
+    ``[0..thought_pos]`` in the cache.  Both thought and solution tokens are
+    removed.  The caller sets ``cache_position`` so the next forward pass
+    re-processes the solution tokens against the cached prefix.
+
+    For non-pruned batch elements all entries are kept.
+
+    Compatible with both transformers ≥5.x (``cache.layers[i].keys/values``)
+    and older versions (``cache.key_cache[i]``).
+
+    Returns the new cache sequence length (``max_new_seq``).
+    """
+    # Detect API version: transformers ≥5 uses cache.layers, older uses cache.key_cache
+    use_layers_api = hasattr(cache, 'layers')
+    if use_layers_api:
+        num_layers = len(cache.layers)
+    elif hasattr(cache, 'key_cache'):
+        num_layers = len(cache.key_cache)  # type: ignore[attr-defined]
+    else:
+        return 0
+
+    if num_layers == 0:
+        return 0
+
+    if use_layers_api:
+        first_keys = cache.layers[0].keys if len(cache.layers) > 0 else None
+    else:
+        first_keys = cache.key_cache[0] if len(cache.key_cache) > 0 else None  # type: ignore[attr-defined]
+    if first_keys is None:
+        return 0
+    device = first_keys.device
+    dtype = first_keys.dtype
+    head_dim = first_keys.shape[-1]
+
+    # Pre-compute per-element keep indices
+    keep_indices: list[torch.Tensor] = []
+
+    for b in range(batch_size):
+        if b in prune_map:
+            thought_pos, _solution_pos = prune_map[b]
+            # Keep only prefix [0..thought_pos].
+            # Solution tokens will be re-processed by the next forward pass.
+            keep = torch.arange(0, thought_pos + 1, device=device)
+        else:
+            # Non-pruned: keep all entries
+            keep = torch.arange(0, old_seq_len, device=device)
+        keep_indices.append(keep)
+
+    max_new_seq = max(k.shape[0] for k in keep_indices)
+
+    for layer_idx in range(num_layers):
+        if use_layers_api:
+            old_keys = cache.layers[layer_idx].keys    # (batch, heads, seq, dim)
+            old_vals = cache.layers[layer_idx].values
+        else:
+            old_keys = cache.key_cache[layer_idx]      # type: ignore[attr-defined]
+            old_vals = cache.value_cache[layer_idx]     # type: ignore[attr-defined]
+        num_heads = old_keys.shape[1]
+
+        new_keys = torch.zeros(
+            batch_size, num_heads, max_new_seq, head_dim,
+            dtype=dtype, device=device,
+        )
+        new_vals = torch.zeros_like(new_keys)
+
+        for b in range(batch_size):
+            keep = keep_indices[b]
+            kept_k = old_keys[b, :, keep, :]   # (heads, kept_len, dim)
+            kept_v = old_vals[b, :, keep, :]
+
+            n = keep.shape[0]
+            new_keys[b, :, :n, :] = kept_k
+            new_vals[b, :, :n, :] = kept_v
+
+        if use_layers_api:
+            cache.layers[layer_idx].keys = new_keys
+            cache.layers[layer_idx].values = new_vals
+        else:
+            cache.key_cache[layer_idx] = new_keys      # type: ignore[attr-defined]
+            cache.value_cache[layer_idx] = new_vals     # type: ignore[attr-defined]
+
+    if hasattr(cache, '_seen_tokens'):
+        cache._seen_tokens = max_new_seq
+    return max_new_seq
+
+
+# ---------------------------------------------------------------------------
+# Generation helpers
+# ---------------------------------------------------------------------------
 
 def _prepare_inputs_for_generation(
     model,
@@ -67,7 +169,19 @@ def _prune_model_inputs(
     input_ids: torch.LongTensor,
     prune_aware: bool,
     model_kwargs: dict[str, Any],
+    retain_kv_cache: bool = True,
 ) -> Tuple[torch.LongTensor, dict[str, Any]]:
+    """Prune input sequences after a ``[RETURN]`` token is generated.
+
+    When ``retain_kv_cache=True`` (default), the function retains the
+    prefix (tokens before the thought block) in the KV cache and sets
+    ``cache_position`` so the next forward pass re-processes the solution
+    tokens against the cached prefix.  Cost: O(k) where k = number of
+    solution tokens.
+
+    When ``retain_kv_cache=False``, the entire cache is discarded and a
+    full re-prefill is performed.  Cost: O(N).
+    """
     is_prune_agnostic = not prune_aware
 
     batch_size = input_ids.shape[0]
@@ -95,7 +209,27 @@ def _prune_model_inputs(
     if not prune_map:
         return input_ids, model_kwargs
 
-    # Build pruned rows per batch element
+    # ------------------------------------------------------------------
+    # Decide whether to retain the KV cache
+    # ------------------------------------------------------------------
+    cache = model_kwargs.get('past_key_values', None)
+    use_layers_api = hasattr(cache, 'layers')
+    cache_populated = (
+        (use_layers_api and len(cache.layers) > 0) if cache is not None
+        else False
+    ) or (
+        hasattr(cache, 'key_cache') and len(cache.key_cache) > 0  # type: ignore[union-attr]
+    ) if cache is not None else False
+    can_retain_cache = (
+        retain_kv_cache
+        and cache is not None
+        and isinstance(cache, DynamicCache)
+        and cache_populated
+    )
+
+    # ------------------------------------------------------------------
+    # Build pruned rows per batch element (same as before)
+    # ------------------------------------------------------------------
     new_rows: list[torch.Tensor] = []
     if is_prune_agnostic:
         new_position_rows: list[torch.Tensor] = list(
@@ -131,18 +265,44 @@ def _prune_model_inputs(
     else:
         model_kwargs['position_ids'] = None
 
-    # Discard the KV cache — the next iteration will re-prefill from scratch
-    old_cache = model_kwargs.pop('past_key_values', None)
-    del old_cache
-    del position_ids
-
-    # Reset cache_position to cover the full pruned sequence so that
-    # prepare_inputs_for_generation treats the next forward as a prefill
-    model_kwargs['cache_position'] = torch.arange(max_len, dtype=torch.int64, device=device)
     model_kwargs['attention_mask'] = new_attention_mask
 
+    # ------------------------------------------------------------------
+    # KV cache handling
+    # ------------------------------------------------------------------
+    if can_retain_cache:
+        if hasattr(cache, 'layers') and len(cache.layers) > 0:
+            old_seq_len = cache.layers[0].keys.shape[2]
+        else:
+            old_seq_len = cache.key_cache[0].shape[2]  # type: ignore[union-attr]
+
+        new_cache_seq = _retain_and_prune_kv_cache(
+            cache=cache,  # type: ignore[arg-type]
+            prune_map=prune_map,
+            batch_size=batch_size,
+            old_seq_len=old_seq_len,
+        )
+
+        # Cache has only the prefix (a tokens).  Set cache_position so
+        # the next forward pass re-processes the solution tokens (c tokens)
+        # against the cached prefix.  Cost: O(k) where k = solution length.
+        model_kwargs['cache_position'] = torch.arange(
+            new_cache_seq, max_len, dtype=torch.int64, device=device,
+        )
+    else:
+        # Fallback: discard the KV cache and re-prefill from scratch
+        old_cache = model_kwargs.pop('past_key_values', None)
+        del old_cache
+
+        # Reset cache_position to cover the full pruned sequence so that
+        # prepare_inputs_for_generation treats the next forward as a prefill
+        model_kwargs['cache_position'] = torch.arange(max_len, dtype=torch.int64, device=device)
+
+    if position_ids is not None:
+        del position_ids
+
     return new_input_ids, model_kwargs # type: ignore
- 
+
 
 
 def _sample(
@@ -155,6 +315,7 @@ def _sample(
     synced_gpus: bool = False,
     streamer: Optional["BaseStreamer"] = None,
     prune_aware: bool = False,
+    retain_kv_cache: bool = True,
     **model_kwargs,
 ):
     """Generate sequences using argmax or sampling from model logits.
@@ -170,13 +331,20 @@ def _sample(
         processing_class (Optional[PreTrainedTokenizerBase]): Tokenizer for token-id conversion. Defaults to None.
         synced_gpus (bool): Whether GPUs are synchronized for multi-device generation. Defaults to False.
         streamer (Optional[BaseStreamer]): Optional streamer to output tokens during generation. Defaults to None.
+        prune_aware (bool): When True, positions are renumbered after pruning (contiguous). Defaults to False.
+        retain_kv_cache (bool): When True (default), retains the prefix in the KV cache
+            after pruning and re-processes only the solution tokens.  Cost: O(k).
+            When False, discards the cache entirely and re-prefills.  Cost: O(N).
         **model_kwargs: Additional keyword arguments passed to the model forward pass.
     Returns:
         torch.LongTensor: Generated sequences of shape (batch_size, seq_len) including input and generated tokens.
     Notes:
-        - In prune-aware mode, model location_ids are cleared. This allows the the model to regenerate the
-          location_ids and fill the KV Cache. In prune agnostic mode, we retain the location_ids of tokens
-          after pruning.
+        - With retain_kv_cache=True, the prefix is cached and solution tokens are
+          re-processed via a standard forward pass.
+        - With retain_kv_cache=False, the KV cache is discarded and the full
+          pruned sequence is re-prefilled from scratch.
+        - In prune-agnostic mode, position_ids are tracked explicitly to maintain original RoPE
+          positions for surviving tokens.
         - Handles batch generation with unfinished sequences tracking.
         - Manages KV-cache through model_kwargs for efficient decoding.
     """
@@ -193,13 +361,13 @@ def _sample(
     return_dict_in_generate = generation_config.return_dict_in_generate
     has_eos_stopping_criteria = any(hasattr(criteria, "eos_token_id") for criteria in stopping_criteria)
     do_sample = generation_config.do_sample
-    
+
     scores = () if (return_dict_in_generate and output_scores) else None
     raw_logits = () if (return_dict_in_generate and output_logits) else None
     decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
     cross_attentions = () if (return_dict_in_generate and output_attentions) else None
     decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
-    
+
     batch_size = input_ids.shape[0]
     this_peer_finished: bool = False
     unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
@@ -242,26 +410,6 @@ def _sample(
         # pre-process distribution
         next_token_scores = logits_processor(input_ids, next_token_logits)
 
-        # Store scores, attentions and hidden_states when required
-        # if return_dict_in_generate:
-        #     if output_scores:
-        #         scores += (next_token_scores,)
-        #     if output_logits:
-        #         raw_logits += (next_token_logits,)
-        #     if output_attentions:
-        #         decoder_attentions += (
-        #             (outputs.decoder_attentions,) if model.config.is_encoder_decoder else (outputs.attentions,)
-        #         )
-        #         if model.config.is_encoder_decoder:
-        #             cross_attentions += (outputs.cross_attentions,)
-
-        #     if output_hidden_states:
-        #         decoder_hidden_states += (
-        #             (outputs.decoder_hidden_states,)
-        #             if model.config.is_encoder_decoder
-        #             else (outputs.hidden_states,)
-        #         )
-
         # token selection
         if do_sample:
             probs = nn.functional.softmax(next_token_scores, dim=-1)
@@ -278,20 +426,20 @@ def _sample(
 
         if streamer is not None:
             streamer.put(next_tokens.cpu())
-        
+
         last_token = next_tokens.view(-1)
-        pos = input_ids.shape[1] - 1 
+        pos = input_ids.shape[1] - 1
         for b in (last_token == thought_token_id).nonzero(as_tuple=True)[0].tolist():
             stacks[b].append([pos, None, None])
 
         for b in (last_token == solution_token_id).nonzero(as_tuple=True)[0].tolist():
             if stacks[b]:
                 stacks[b][-1][1] = pos
-        
+
         for b in (last_token == return_token_id).nonzero(as_tuple=True)[0].tolist():
             if stacks[b]:
                 stacks[b][-1][2] = pos
-        
+
         return_indices = (last_token == return_token_id).nonzero(as_tuple=True)[0].tolist()
         prune_candidates = [idx for idx in return_indices if stacks[idx]]
 
@@ -302,7 +450,8 @@ def _sample(
                 prune_input_locations=[[stacks[b].pop()] for b in prune_candidates],
                 input_ids=input_ids,
                 prune_aware=prune_aware,
-                model_kwargs=model_kwargs
+                model_kwargs=model_kwargs,
+                retain_kv_cache=retain_kv_cache,
             )
 
         unfinished_sequences = unfinished_sequences & ~stopping_criteria(input_ids, scores) # type: ignore
@@ -345,11 +494,21 @@ def _sample(
         return input_ids
 
 
-def generate(model, processing_class = None, **kwargs):
-    """Custom generate method for Hierarchical Chain of Thought"""
+def generate(model, processing_class = None, retain_kv_cache: bool = True, **kwargs):
+    """Custom generate method for Hierarchical Chain of Thought.
+
+    Args:
+        model: The language model.
+        processing_class: Tokenizer / processing class.
+        retain_kv_cache: When True (default), retains the prefix in the KV
+            cache after pruning and re-processes solution tokens.  When False,
+            discards the cache entirely.
+        **kwargs: Forwarded to ``model.generate``.
+    """
 
     return model.generate(
         custom_generate=_sample,
         processing_class=processing_class,
+        retain_kv_cache=retain_kv_cache,
         **kwargs
     )
