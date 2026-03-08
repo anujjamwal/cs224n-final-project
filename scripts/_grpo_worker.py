@@ -25,7 +25,7 @@ def main():
     parser.add_argument("--num-epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--grad-accum-steps", type=int, default=4)
-    parser.add_argument("--learning-rate", type=float, default=5e-7)
+    parser.add_argument("--learning-rate", type=float, default=1e-5)
     parser.add_argument("--max-completion-length", type=int, default=4096)
     parser.add_argument("--sample-every-n-steps", type=int, default=50)
     parser.add_argument("--output-dir", default="/checkpoints/PruneAware-nemotron-1.5b-grpo")
@@ -226,6 +226,9 @@ def main():
         gradient_checkpointing=True,
         mask_truncated_completions=True,
         torch_compile=False,
+        warmup_ratio=0.1,
+        weight_decay=0.01,
+        lr_scheduler_type="cosine",
 
         # Reward weighting
         reward_weights=reward_weights,
