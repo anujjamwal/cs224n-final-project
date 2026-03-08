@@ -16,8 +16,8 @@ sys.path.insert(0, "/root/lib")
 
 def main():
     parser = argparse.ArgumentParser(description="GRPO training worker")
-    parser.add_argument("--model-name", default="anujjamwal/OpenMath-Nemotron-1.5B-hcot")
-    parser.add_argument("--grpo-repo-id", default="anujjamwal/OpenMath-Nemotron-1.5B-hcot-grpo")
+    parser.add_argument("--model-name", default="anujjamwal/OpenMath-Nemotron-1.5B-PruneAware")
+    parser.add_argument("--grpo-repo-id", default="anujjamwal/OpenMath-Nemotron-1.5B-PruneAware-grpo")
     parser.add_argument("--dataset", default="davidanugraha/OpenMathReasoning-Sampled")
     parser.add_argument("--dataset-offset", type=int, default=0)
     parser.add_argument("--dataset-limit", type=int, default=1000)
@@ -28,8 +28,12 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=5e-7)
     parser.add_argument("--max-completion-length", type=int, default=4096)
     parser.add_argument("--sample-every-n-steps", type=int, default=50)
-    parser.add_argument("--output-dir", default="/checkpoints/hcot-nemotron-1.5b-grpo")
+    parser.add_argument("--output-dir", default="/checkpoints/PruneAware-nemotron-1.5b-grpo")
     parser.add_argument("--deepspeed", default=None, help="Path to DeepSpeed config JSON")
+    parser.add_argument("--use-lora", action="store_true", help="Use LoRA (PEFT) instead of full fine-tuning")
+    parser.add_argument("--lora-r", type=int, default=32, help="LoRA rank")
+    parser.add_argument("--lora-alpha", type=int, default=64, help="LoRA alpha")
+    parser.add_argument("--lora-dropout", type=float, default=0.05, help="LoRA dropout")
     args = parser.parse_args()
 
     import torch
@@ -48,6 +52,18 @@ def main():
         format_reward,
     )
     from custom_generate import generate
+
+    # ---- PEFT / LoRA ----
+    peft_config = None
+    if args.use_lora:
+        from peft import LoraConfig
+        peft_config = LoraConfig(
+            r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
+            lora_dropout=args.lora_dropout,
+            task_type="CAUSAL_LM",
+        )
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     is_main = local_rank == 0
@@ -71,6 +87,9 @@ def main():
                 "max_completion_length": args.max_completion_length,
                 "reward_weights": reward_weights,
                 "deepspeed": args.deepspeed,
+                "use_lora": args.use_lora,
+                "lora_r": args.lora_r if args.use_lora else None,
+                "lora_alpha": args.lora_alpha if args.use_lora else None,
             },
         )
 
@@ -79,6 +98,7 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
         torch_dtype=torch.bfloat16,
+        trust_remote_code=True,
         # No device_map="auto" — let Accelerate/DeepSpeed handle placement
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -233,6 +253,7 @@ def main():
         args=training_args,
         train_dataset=dataset,
         callbacks=[sample_cb],
+        peft_config=peft_config,
     )
 
     torch.cuda.empty_cache()
@@ -242,7 +263,13 @@ def main():
 
     # ---- Push & cleanup (main process only) ----
     if is_main:
-        trainer.push_to_hub()
+        if args.use_lora:
+            # Merge LoRA weights into the base model and push the full model
+            print("Merging LoRA adapter into base model...")
+            merged_model = trainer.model.merge_and_unload()
+            merged_model.push_to_hub(args.grpo_repo_id)
+        else:
+            trainer.push_to_hub()
         tokenizer.push_to_hub(args.grpo_repo_id)
         wandb.finish()
         print("Training complete! Model pushed to HuggingFace Hub.")

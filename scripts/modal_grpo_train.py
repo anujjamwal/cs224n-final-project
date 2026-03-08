@@ -33,6 +33,7 @@ image = (
         "transformers",
         "datasets",
         "trl",
+        "peft",
         "accelerate",
         "deepspeed",
         "sentencepiece",
@@ -71,108 +72,49 @@ _COMMON_KWARGS = dict(
 )
 
 
+_GPU_FUNC_DEFAULTS = dict(
+    model_name="anujjamwal/OpenMath-Nemotron-1.5B-hcot",
+    grpo_repo_id="anujjamwal/OpenMath-Nemotron-1.5B-hcot-grpo",
+    dataset="davidanugraha/OpenMathReasoning-Sampled",
+    dataset_offset=0,
+    dataset_limit=1000,
+    num_generations=4,
+    num_epochs=1,
+    batch_size=2,
+    grad_accum_steps=4,
+    learning_rate=5e-7,
+    max_completion_length=4096,
+    sample_every_n_steps=50,
+    use_lora=False,
+    lora_r=32,
+    lora_alpha=64,
+    lora_dropout=0.05,
+)
+
+
+def _forward_to_run_training(num_gpus: int, **kwargs):
+    merged = {**_GPU_FUNC_DEFAULTS, **kwargs}
+    _run_training(num_gpus=num_gpus, **merged)
+
+
 @app.function(gpu="a100", **_COMMON_KWARGS)
-def train_1gpu(
-    model_name: str = "anujjamwal/OpenMath-Nemotron-1.5B-hcot",
-    grpo_repo_id: str = "anujjamwal/OpenMath-Nemotron-1.5B-hcot-grpo",
-    num_generations: int = 4,
-    num_epochs: int = 1,
-    batch_size: int = 2,
-    grad_accum_steps: int = 4,
-    learning_rate: float = 5e-7,
-    max_completion_length: int = 4096,
-    sample_every_n_steps: int = 50,
-):
-    _run_training(
-        num_gpus=1,
-        model_name=model_name,
-        grpo_repo_id=grpo_repo_id,
-        num_generations=num_generations,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        grad_accum_steps=grad_accum_steps,
-        learning_rate=learning_rate,
-        max_completion_length=max_completion_length,
-        sample_every_n_steps=sample_every_n_steps,
-    )
+def train_1gpu(**kwargs):
+    _forward_to_run_training(num_gpus=1, **kwargs)
 
 
 @app.function(gpu="a100:2", **_COMMON_KWARGS)
-def train_2gpu(
-    model_name: str = "anujjamwal/OpenMath-Nemotron-1.5B-hcot",
-    grpo_repo_id: str = "anujjamwal/OpenMath-Nemotron-1.5B-hcot-grpo",
-    num_generations: int = 4,
-    num_epochs: int = 1,
-    batch_size: int = 2,
-    grad_accum_steps: int = 4,
-    learning_rate: float = 5e-7,
-    max_completion_length: int = 4096,
-    sample_every_n_steps: int = 50,
-):
-    _run_training(
-        num_gpus=2,
-        model_name=model_name,
-        grpo_repo_id=grpo_repo_id,
-        num_generations=num_generations,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        grad_accum_steps=grad_accum_steps,
-        learning_rate=learning_rate,
-        max_completion_length=max_completion_length,
-        sample_every_n_steps=sample_every_n_steps,
-    )
+def train_2gpu(**kwargs):
+    _forward_to_run_training(num_gpus=2, **kwargs)
 
 
 @app.function(gpu="a100:4", **_COMMON_KWARGS)
-def train_4gpu(
-    model_name: str = "anujjamwal/OpenMath-Nemotron-1.5B-hcot",
-    grpo_repo_id: str = "anujjamwal/OpenMath-Nemotron-1.5B-hcot-grpo",
-    num_generations: int = 4,
-    num_epochs: int = 1,
-    batch_size: int = 2,
-    grad_accum_steps: int = 4,
-    learning_rate: float = 5e-7,
-    max_completion_length: int = 4096,
-    sample_every_n_steps: int = 50,
-):
-    _run_training(
-        num_gpus=4,
-        model_name=model_name,
-        grpo_repo_id=grpo_repo_id,
-        num_generations=num_generations,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        grad_accum_steps=grad_accum_steps,
-        learning_rate=learning_rate,
-        max_completion_length=max_completion_length,
-        sample_every_n_steps=sample_every_n_steps,
-    )
+def train_4gpu(**kwargs):
+    _forward_to_run_training(num_gpus=4, **kwargs)
 
 
 @app.function(gpu="a100:8", **_COMMON_KWARGS)
-def train_8gpu(
-    model_name: str = "anujjamwal/OpenMath-Nemotron-1.5B-hcot",
-    grpo_repo_id: str = "anujjamwal/OpenMath-Nemotron-1.5B-hcot-grpo",
-    num_generations: int = 4,
-    num_epochs: int = 1,
-    batch_size: int = 2,
-    grad_accum_steps: int = 4,
-    learning_rate: float = 5e-7,
-    max_completion_length: int = 4096,
-    sample_every_n_steps: int = 50,
-):
-    _run_training(
-        num_gpus=8,
-        model_name=model_name,
-        grpo_repo_id=grpo_repo_id,
-        num_generations=num_generations,
-        num_epochs=num_epochs,
-        batch_size=batch_size,
-        grad_accum_steps=grad_accum_steps,
-        learning_rate=learning_rate,
-        max_completion_length=max_completion_length,
-        sample_every_n_steps=sample_every_n_steps,
-    )
+def train_8gpu(**kwargs):
+    _forward_to_run_training(num_gpus=8, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +126,9 @@ def _run_training(
     num_gpus: int,
     model_name: str,
     grpo_repo_id: str,
+    dataset: str,
+    dataset_offset: int,
+    dataset_limit: int,
     num_generations: int,
     num_epochs: int,
     batch_size: int,
@@ -191,10 +136,13 @@ def _run_training(
     learning_rate: float,
     max_completion_length: int,
     sample_every_n_steps: int,
+    use_lora: bool = False,
+    lora_r: int = 32,
+    lora_alpha: int = 64,
+    lora_dropout: float = 0.05,
 ):
     import json
     import subprocess
-    import tempfile
 
     output_dir = "/checkpoints/hcot-nemotron-1.5b-grpo"
 
@@ -202,6 +150,9 @@ def _run_training(
     worker_args = [
         "--model-name", model_name,
         "--grpo-repo-id", grpo_repo_id,
+        "--dataset", dataset,
+        "--dataset-offset", str(dataset_offset),
+        "--dataset-limit", str(dataset_limit),
         "--num-generations", str(num_generations),
         "--num-epochs", str(num_epochs),
         "--batch-size", str(batch_size),
@@ -211,6 +162,14 @@ def _run_training(
         "--sample-every-n-steps", str(sample_every_n_steps),
         "--output-dir", output_dir,
     ]
+
+    if use_lora:
+        worker_args += [
+            "--use-lora",
+            "--lora-r", str(lora_r),
+            "--lora-alpha", str(lora_alpha),
+            "--lora-dropout", str(lora_dropout),
+        ]
 
     if num_gpus > 1:
         # Write DeepSpeed ZeRO-2 config
@@ -265,11 +224,41 @@ _TRAIN_FNS = {1: train_1gpu, 2: train_2gpu, 4: train_4gpu, 8: train_8gpu}
 @app.local_entrypoint()
 def main(
     num_gpus: int = 1,
+    # Dataset
+    dataset: str = "davidanugraha/OpenMathReasoning-Sampled",
+    dataset_offset: int = 0,
+    dataset_limit: int = 1000,
+    # Training
     num_generations: int = 4,
-    gpu: str = "a100",
+    num_epochs: int = 1,
+    batch_size: int = 2,
+    grad_accum_steps: int = 4,
+    learning_rate: float = 5e-7,
+    max_completion_length: int = 4096,
+    sample_every_n_steps: int = 50,
+    # LoRA
+    use_lora: bool = False,
+    lora_r: int = 32,
+    lora_alpha: int = 64,
+    lora_dropout: float = 0.05,
 ):
     if num_gpus not in _TRAIN_FNS:
         raise ValueError(f"num_gpus must be one of {list(_TRAIN_FNS.keys())}, got {num_gpus}")
 
     fn = _TRAIN_FNS[num_gpus]
-    fn.remote(num_generations=num_generations)
+    fn.remote(
+        dataset=dataset,
+        dataset_offset=dataset_offset,
+        dataset_limit=dataset_limit,
+        num_generations=num_generations,
+        num_epochs=num_epochs,
+        batch_size=batch_size,
+        grad_accum_steps=grad_accum_steps,
+        learning_rate=learning_rate,
+        max_completion_length=max_completion_length,
+        sample_every_n_steps=sample_every_n_steps,
+        use_lora=use_lora,
+        lora_r=lora_r,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+    )
