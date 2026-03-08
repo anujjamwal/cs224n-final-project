@@ -15,7 +15,7 @@ Usage examples:
 
     # HCoT model on easy problems only:
     python scripts/eval_polymath.py \\
-        --model-path anujjamwal/OpenMath-Nemotron-1.5B-hcot \\
+        --model-path anujjamwal/OpenMath-Nemotron-1.5B-PruneAware \\
         --output-dir results/polymath-hcot-top \\
         --modes hcot \\
         --levels top \\
@@ -88,7 +88,7 @@ def main():
     dtype = dtype_map[args.dtype]
 
     logger.info("Loading model: %s (dtype=%s)", args.model_path, args.dtype)
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=dtype, device_map="auto")
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, dtype=dtype, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
     if args.prepare_base_model:

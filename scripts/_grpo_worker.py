@@ -29,7 +29,6 @@ def main():
     parser.add_argument("--max-completion-length", type=int, default=4096)
     parser.add_argument("--sample-every-n-steps", type=int, default=50)
     parser.add_argument("--output-dir", default="/checkpoints/PruneAware-nemotron-1.5b-grpo")
-    parser.add_argument("--deepspeed", default=None, help="Path to DeepSpeed config JSON")
     parser.add_argument("--use-lora", action="store_true", help="Use LoRA (PEFT) instead of full fine-tuning")
     parser.add_argument("--lora-r", type=int, default=32, help="LoRA rank")
     parser.add_argument("--lora-alpha", type=int, default=64, help="LoRA alpha")
@@ -51,7 +50,6 @@ def main():
         compression_reward,
         format_reward,
     )
-    from custom_generate import generate
 
     # ---- PEFT / LoRA ----
     peft_config = None
@@ -86,7 +84,6 @@ def main():
                 "learning_rate": args.learning_rate,
                 "max_completion_length": args.max_completion_length,
                 "reward_weights": reward_weights,
-                "deepspeed": args.deepspeed,
                 "use_lora": args.use_lora,
                 "lora_r": args.lora_r if args.use_lora else None,
                 "lora_alpha": args.lora_alpha if args.use_lora else None,
@@ -97,7 +94,7 @@ def main():
     print(f"[rank {local_rank}] Loading model: {args.model_name}")
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         trust_remote_code=True,
         # No device_map="auto" — let Accelerate/DeepSpeed handle placement
     )
@@ -113,7 +110,7 @@ def main():
     raw_dataset = load_dataset(
         args.dataset,
         split="train",
-    ).filter(lambda ex: len(ex["hierarchical_cot"]) > 50).skip(args.dataset_offset).take(args.dataset_limit)
+    ).skip(args.dataset_offset).take(args.dataset_limit)
 
     if is_main:
         print(f"Dataset size: {len(raw_dataset)}")
@@ -215,7 +212,6 @@ def main():
         # Generation
         num_generations=args.num_generations,
         max_completion_length=args.max_completion_length,
-        max_prompt_length=512,
         generation_kwargs={
             "processing_class": tokenizer,
             "return_unpruned_output": True,
@@ -229,9 +225,6 @@ def main():
         beta=0.1,
         bf16=True,
         gradient_checkpointing=True,
-
-        # DeepSpeed (None for single-GPU)
-        deepspeed=args.deepspeed,
 
         # Reward weighting
         reward_weights=reward_weights,

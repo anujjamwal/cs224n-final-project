@@ -13,14 +13,14 @@ Usage examples:
 
     # HCoT model with pruning on all levels:
     python scripts/eval_math.py \\
-        --model-path anujjamwal/OpenMath-Nemotron-1.5B-hcot \\
+        --model-path anujjamwal/OpenMath-Nemotron-1.5B-PruneAware \\
         --output-dir results/math-hcot \\
         --modes hcot \\
         --batch-size 4
 
     # Resume an interrupted run (same command — skips already-done problems):
     python scripts/eval_math.py \\
-        --model-path anujjamwal/OpenMath-Nemotron-1.5B-hcot \\
+        --model-path anujjamwal/OpenMath-Nemotron-1.5B-PruneAware \\
         --output-dir results/math-hcot \\
         --modes hcot \\
         --batch-size 4
@@ -85,7 +85,7 @@ def main():
     dtype = dtype_map[args.dtype]
 
     logger.info("Loading model: %s (dtype=%s)", args.model_path, args.dtype)
-    model = AutoModelForCausalLM.from_pretrained(args.model_path, torch_dtype=dtype, device_map="auto")
+    model = AutoModelForCausalLM.from_pretrained(args.model_path, dtype=dtype, device_map="auto")
     tokenizer = AutoTokenizer.from_pretrained(args.model_path)
 
     if args.prepare_base_model:
