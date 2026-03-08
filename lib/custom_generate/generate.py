@@ -316,6 +316,7 @@ def _sample(
     streamer: Optional["BaseStreamer"] = None,
     prune_aware: bool = False,
     retain_kv_cache: bool = True,
+    return_unpruned_output: bool = False,
     **model_kwargs,
 ):
     """Generate sequences using argmax or sampling from model logits.
@@ -373,6 +374,9 @@ def _sample(
     unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
     stacks = [[] for _ in range(batch_size)]
 
+    if return_unpruned_output:
+        unpruned_ids = [input_ids[b].tolist() for b in range(batch_size)]
+
     model_forward = (
         model.get_compiled_call(generation_config.compile_config)
         if GenerationMixin._valid_auto_compile_criteria(model, model_kwargs, generation_config)
@@ -421,6 +425,10 @@ def _sample(
         if has_eos_stopping_criteria:
             next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
 
+        if return_unpruned_output:
+            for b in range(batch_size):
+                unpruned_ids[b].append(next_tokens[b].item())
+
         # update generated ids, model inputs, and length for next step
         input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1) # type: ignore
 
@@ -464,6 +472,17 @@ def _sample(
     if streamer is not None:
         streamer.end()
 
+    if return_unpruned_output:
+        max_len = max(len(ids) for ids in unpruned_ids)
+        pad_id = pad_token_id.item() if isinstance(pad_token_id, torch.Tensor) else pad_token_id
+        unpruned_tensor = torch.full(
+            (batch_size, max_len), pad_id,
+            dtype=input_ids.dtype, device=input_ids.device,
+        )
+        for b, ids in enumerate(unpruned_ids):
+            unpruned_tensor[b, :len(ids)] = torch.tensor(ids, dtype=input_ids.dtype, device=input_ids.device)
+        input_ids = unpruned_tensor
+
     if return_dict_in_generate:
         cache = None
         if any(cache_key in model_kwargs for cache_key in ALL_CACHE_NAMES):
@@ -494,7 +513,7 @@ def _sample(
         return input_ids
 
 
-def generate(model, processing_class = None, retain_kv_cache: bool = True, **kwargs):
+def generate(model, processing_class = None, retain_kv_cache: bool = True, return_unpruned_output: bool = False, **kwargs):
     """Custom generate method for Hierarchical Chain of Thought.
 
     Args:
@@ -510,5 +529,6 @@ def generate(model, processing_class = None, retain_kv_cache: bool = True, **kwa
         custom_generate=_sample,
         processing_class=processing_class,
         retain_kv_cache=retain_kv_cache,
+        return_unpruned_output=return_unpruned_output,
         **kwargs
     )
