@@ -44,10 +44,10 @@ def main():
     from trainer import prepare_base_model
     from trainer.rewards import (
         correctness_reward,
-        syntax_reward,
-        leaf_length_reward,
-        depth_reward,
-        compression_reward,
+        build_syntax_reward,
+        build_short_thought_reward,
+        build_depth_reward,
+        build_compression_reward,
         format_reward,
     )
 
@@ -68,7 +68,7 @@ def main():
     is_distributed = int(os.environ.get("WORLD_SIZE", 1)) > 1
 
     # ---- W&B init (main process only) ----
-    reward_weights = [2.0, 1.0, 0.5, 0.5, 0.5, 0.5]
+    reward_weights = [2.0, 1.0, 0.5, 0.5, 1.0, 0.5]
     if is_main:
         wandb.init(
             project="hcot-grpo",
@@ -96,6 +96,7 @@ def main():
         args.model_name,
         dtype=torch.bfloat16,
         trust_remote_code=True,
+        # attn_implementation="flash_attention_2",
         # No device_map="auto" — let Accelerate/DeepSpeed handle placement
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
@@ -129,10 +130,15 @@ def main():
     )
 
     # ---- Reward functions ----
+    syntax_reward = build_syntax_reward(tokenizer)
+    compression_reward = build_compression_reward(tokenizer)
+    depth_reward = build_depth_reward(tokenizer)
+    short_thought_reward = build_short_thought_reward(tokenizer)
+
     reward_funcs = [
         correctness_reward,
         syntax_reward,
-        leaf_length_reward,
+        short_thought_reward,
         depth_reward,
         compression_reward,
         format_reward,
@@ -223,7 +229,7 @@ def main():
         learning_rate=args.learning_rate,
         beta=0.1,
         bf16=True,
-        gradient_checkpointing=True,
+        gradient_checkpointing=False,
         mask_truncated_completions=True,
         torch_compile=False,
         warmup_ratio=0.1,

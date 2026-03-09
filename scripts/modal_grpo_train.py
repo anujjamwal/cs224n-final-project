@@ -25,9 +25,12 @@ import modal
 # ---------------------------------------------------------------------------
 # Modal app & image
 # ---------------------------------------------------------------------------
-
+flash_attn_release = (
+    "https://github.com/lesj0610/flash-attention/releases/download/"
+    "v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3%2Bcu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+)
 image = (
-    modal.Image.debian_slim(python_version="3.10")
+    modal.Image.debian_slim(python_version="3.13")
     .pip_install(
         "torch",
         "transformers",
@@ -38,8 +41,7 @@ image = (
         "sentencepiece",
         "math-verify",
         "wandb",
-        "huggingface_hub",
-    )
+        "huggingface_hub",)
     .add_local_dir("lib", remote_path="/root/lib")
     .add_local_file(
         "scripts/_grpo_worker.py", remote_path="/root/scripts/_grpo_worker.py"
@@ -62,7 +64,7 @@ SECRETS = [
 # ---------------------------------------------------------------------------
 
 @app.function(
-    gpu="A100-40GB:4",
+    gpu="A100:8",
     timeout=6 * 3600,
     secrets=SECRETS,
     volumes={"/checkpoints": vol},
@@ -76,9 +78,9 @@ def train(
     dataset_limit: int = 1000,
     num_generations: int = 4,
     num_epochs: int = 1,
-    batch_size: int = 2,
-    grad_accum_steps: int = 4,
-    learning_rate: float = 5e-7,
+    batch_size: int = 1,
+    grad_accum_steps: int = 2,
+    learning_rate: float = 1e-5,
     max_completion_length: int = 4096,
     sample_every_n_steps: int = 50,
     use_lora: bool = False,
@@ -143,7 +145,7 @@ def train(
 
 @app.local_entrypoint()
 def main(
-    num_gpus: int = 4,
+    num_gpus: int = 8,
     # Dataset
     dataset: str = "davidanugraha/OpenMathReasoning-Sampled",
     dataset_offset: int = 0,
@@ -151,13 +153,13 @@ def main(
     # Training
     num_generations: int = 4,
     num_epochs: int = 1,
-    batch_size: int = 4,
-    grad_accum_steps: int = 1,
-    learning_rate: float = 5e-7,
+    batch_size: int = 1,
+    grad_accum_steps: int = 2,
+    learning_rate: float = 1e-5,
     max_completion_length: int = 4096,
     sample_every_n_steps: int = 50,
     # LoRA
-    use_lora: bool = False,
+    use_lora: bool = True,
     lora_r: int = 32,
     lora_alpha: int = 64,
     lora_dropout: float = 0.05,
