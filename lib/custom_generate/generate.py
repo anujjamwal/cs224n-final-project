@@ -358,7 +358,9 @@ def _prune_model_inputs(
     return new_input_ids, model_kwargs # type: ignore
 
 
-
+# This code has been copied over from transformers library utils.py and updated to add the 
+# code specific to context pruning. This code only works on decoder models even though
+# at places there are references to is_encoder_decoder check.
 def _sample(
     model,
     input_ids: torch.LongTensor,
@@ -536,34 +538,48 @@ def _sample(
         _cur_len += 1
         input_ids = _ids_buf[:, :_cur_len]
 
-        # Single GPU→CPU transfer; all comparisons on CPU to avoid
-        # multiple synchronization stalls per token step.
-        # Also used by streamer and return_unpruned_output.
-        next_tokens_cpu = next_tokens.cpu()
-
+        # Optimization: This is done to avoid the cpu() call unless needed
+        _next_cpu = None
+        def _get_next_cpu():
+            nonlocal _next_cpu
+            if _next_cpu is None:
+                _next_cpu = next_tokens.cpu()
+            return _next_cpu
+        
         if streamer is not None:
-            streamer.put(next_tokens_cpu)
+            streamer.put(_get_next_cpu())
 
         pos = input_ids.shape[1] - 1
 
         if return_unpruned_output:
+            _cpu = _get_next_cpu()
             for b in range(batch_size):
-                unpruned_ids[b].append(next_tokens_cpu[b].item())
+                unpruned_ids[b].append(_cpu[b].item())
 
-        for b in (next_tokens_cpu == thought_token_id).nonzero(as_tuple=True)[0].tolist():
-            stacks[b].append([pos, None, None])
+        # Optimization: This comparison happens on GPU and we only sync once
+        # during the if check to see if there is any special token
+        _is_thought = next_tokens == thought_token_id
+        _is_solution = next_tokens == solution_token_id
+        _is_return = next_tokens == return_token_id
+        _any_special = (_is_thought | _is_solution | _is_return).any()
+        
+        if _any_special.item():
+            for b in _is_solution.nonzero(as_tuple=True)[0].tolist():
+                if stacks[b]:
+                    stacks[b][-1][1] = pos
 
-        for b in (next_tokens_cpu == solution_token_id).nonzero(as_tuple=True)[0].tolist():
-            if stacks[b]:
-                stacks[b][-1][1] = pos
+            for b in _is_solution.nonzero(as_tuple=True)[0].tolist():
+                if stacks[b]:
+                    stacks[b][-1][1] = pos
 
-        is_return = next_tokens_cpu == return_token_id
-        for b in is_return.nonzero(as_tuple=True)[0].tolist():
-            if stacks[b]:
-                stacks[b][-1][2] = pos
+            for b in _is_return.nonzero(as_tuple=True)[0].tolist():
+                if stacks[b]:
+                    stacks[b][-1][2] = pos
 
-        return_indices = is_return.nonzero(as_tuple=True)[0].tolist()
-        prune_candidates = [idx for idx in return_indices if stacks[idx]]
+            return_indices = _is_return.nonzero(as_tuple=True)[0].tolist()
+            prune_candidates = [idx for idx in return_indices if stacks[idx]]
+        else:
+            prune_candidates = []
 
         if prune_candidates:
             input_ids, model_kwargs = _prune_model_inputs(
