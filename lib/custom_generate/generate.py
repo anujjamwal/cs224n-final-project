@@ -370,7 +370,7 @@ def _sample(
     processing_class: Optional[PreTrainedTokenizerBase] = None,
     synced_gpus: bool = False,
     streamer: Optional["BaseStreamer"] = None,
-    prune_aware: bool = False,
+    prune_aware: bool = True,
     retain_kv_cache: bool = True,
     return_unpruned_output: bool = False,
     **model_kwargs,
@@ -422,11 +422,12 @@ def _sample(
 
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+    else:
+        tokenizer = processing_class
 
-
-    thought_token_id = processing_class.convert_tokens_to_ids("[THOUGHT]")
-    solution_token_id = processing_class.convert_tokens_to_ids("[SOLUTION]")
-    return_token_id = processing_class.convert_tokens_to_ids("[RETURN]")
+    thought_token_id = tokenizer.convert_tokens_to_ids("[THOUGHT]")
+    solution_token_id = tokenizer.convert_tokens_to_ids("[SOLUTION]")
+    return_token_id = tokenizer.convert_tokens_to_ids("[RETURN]")
 
     pad_token_id = generation_config._pad_token_tensor # type: ignore
     output_attentions = generation_config.output_attentions
