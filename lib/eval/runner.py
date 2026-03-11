@@ -214,7 +214,7 @@ def run_eval(
         total=(len(pending) + batch_size - 1) // batch_size,
     ):
         batch = pending[batch_start : batch_start + batch_size]
-        prompts = [convert_to_trl_prompt(p, system_prompt)["prompt"] for p in batch]
+        prompts = [convert_to_trl_prompt(p, question_key="problem")["prompt"] for p in batch]
         inp = tokenizer.apply_chat_template(
             prompts,
             add_generation_prompt=True,
