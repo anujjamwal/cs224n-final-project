@@ -19,7 +19,7 @@ import torch
 from tqdm.auto import tqdm
 
 from .benchmarks import Benchmark, EvalProblem
-from ..trainer.dataset import convert_to_trl_prompt
+from trainer.dataset import convert_to_trl_prompt
 
 logger = logging.getLogger(__name__)
 
