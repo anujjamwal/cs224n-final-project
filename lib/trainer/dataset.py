@@ -8,12 +8,17 @@ import utils
 
 def convert_to_trl(example, think_key="hierarchical_cot", output_key="expected_answer", question_key="question"):
     prompt = "Solve the following math problem. Make sure to put the answer (and only answer) inside \\boxed{}."
-    assistant_content = f"<think>\n{example[think_key]}\n</think>\n\\boxed{{{example[output_key]}}}"
+
+    question = example[question_key] if isinstance(example, dict) else getattr(example, question_key)
+    cot = example[think_key] if isinstance(example, dict) else getattr(example, think_key)
+    output = example[output_key] if isinstance(example, dict) else getattr(example, output_key)
+
+    assistant_content = f"<think>\n{cot}\n</think>\n\\boxed{{{output}}}"
     
     return {
         "prompt": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": example[question_key]},
+            {"role": "user", "content": question},
         ],
         "completion": [
             {"role": "assistant", "content": assistant_content},
@@ -23,11 +28,11 @@ def convert_to_trl(example, think_key="hierarchical_cot", output_key="expected_a
 
 def convert_to_trl_prompt(example, question_key="question"):
     prompt = "Solve the following math problem. Make sure to put the answer (and only answer) inside \\boxed{}."
-    
+    question = example[question_key] if isinstance(example, dict) else getattr(example, question_key)
     return {
         "prompt": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": example[question_key]},
+            {"role": "user", "content": question},
         ],
     }
 
