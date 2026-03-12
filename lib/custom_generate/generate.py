@@ -388,7 +388,7 @@ def _sample(
         processing_class (Optional[PreTrainedTokenizerBase]): Tokenizer for token-id conversion. Defaults to None.
         synced_gpus (bool): Whether GPUs are synchronized for multi-device generation. Defaults to False.
         streamer (Optional[BaseStreamer]): Optional streamer to output tokens during generation. Defaults to None.
-        prune_aware (bool): When True, positions are renumbered after pruning (contiguous). Defaults to False.
+        prune_aware (bool): When True, positions are renumbered after pruning (contiguous). Defaults to True.
         retain_kv_cache (bool): When True (default), retains the prefix in the KV cache
             after pruning and re-processes only the solution tokens.  Cost: O(k).
             When False, discards the cache entirely and re-prefills.  Cost: O(N).
