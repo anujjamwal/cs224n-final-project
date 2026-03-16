@@ -433,11 +433,26 @@ def _sample(
     if return_unpruned_output:
         unpruned_ids = [input_ids[b].tolist() for b in range(batch_size)]
 
-    model_forward = (
-        model.get_compiled_call(generation_config.compile_config)
-        if GenerationMixin._valid_auto_compile_criteria(model, model_kwargs, generation_config)
-        else model.__call__
-    )
+    # Disable HF auto-compile: it triggers recompilation storms when input
+    # shapes change (different prompt lengths, post-prune re-processing).
+    # Instead, we explicitly compile for the decode phase below where the
+    # input shape is always (batch, 1).
+    model_forward = model.__call__
+
+    # Pre-compile a forward callable for single-token decode steps.
+    # mode="reduce-overhead" enables CUDA-graph capture internally,
+    # eliminating Python and kernel-launch overhead per step.
+    _compiled_decode_forward = None
+    if torch.cuda.is_available():
+        try:
+            _compiled_decode_forward = torch.compile(
+                model.__call__,
+                mode="reduce-overhead",
+                fullgraph=False,
+            )
+        except Exception:
+            # Fall back to uncompiled if torch.compile is unavailable
+            _compiled_decode_forward = None
 
     # Pre-allocate input_ids buffer to avoid O(n²) copies from torch.cat
     # on every token step.  input_ids becomes a view into this buffer.
@@ -472,8 +487,17 @@ def _sample(
     while GenerationMixin._has_unfinished_sequences(model, this_peer_finished, synced_gpus, device=input_ids.device):
         if prefill_consumed:
             model_inputs = _prepare_inputs_for_generation(model, input_ids, **model_kwargs)
+            # Use compiled forward for single-token decode steps (static
+            # shape).  Post-prune re-processing has variable-length input
+            # and must go through the uncompiled path to avoid recompilation.
+            _is_single_token = model_inputs["input_ids"].shape[1] == 1
+            _fwd = (
+                _compiled_decode_forward
+                if _is_single_token and _compiled_decode_forward is not None
+                else model_forward
+            )
             with GenerationMixin._optimize_model_for_decode(model):
-                outputs = model_forward(**model_inputs, return_dict=True)
+                outputs = _fwd(**model_inputs, return_dict=True)
         prefill_consumed = True
         model_kwargs = _update_model_kwargs_for_generation(
             model,
