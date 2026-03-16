@@ -439,19 +439,19 @@ def _sample(
     # input shape is always (batch, 1).
     model_forward = model.__call__
 
-    # Pre-compile a forward callable for single-token decode steps.
-    # mode="reduce-overhead" enables CUDA-graph capture internally,
-    # eliminating Python and kernel-launch overhead per step.
-    _compiled_decode_forward = None
-    if torch.cuda.is_available():
+    # Cache the compiled decode forward on the model instance so it
+    # persists across generate() calls.  Without this, each call to
+    # _sample would re-invoke torch.compile and lose the compiled kernel.
+    _compiled_decode_forward = getattr(model, '_compiled_decode_forward', None)
+    if _compiled_decode_forward is None and torch.cuda.is_available():
         try:
             _compiled_decode_forward = torch.compile(
                 model.__call__,
                 mode="reduce-overhead",
                 fullgraph=False,
             )
+            model._compiled_decode_forward = _compiled_decode_forward
         except Exception:
-            # Fall back to uncompiled if torch.compile is unavailable
             _compiled_decode_forward = None
 
     # Pre-allocate input_ids buffer to avoid O(n²) copies from torch.cat
