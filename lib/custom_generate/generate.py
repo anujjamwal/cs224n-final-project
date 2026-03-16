@@ -1,4 +1,3 @@
-import logging
 from typing import Any, Optional, Sequence, Tuple
 
 import torch
@@ -434,30 +433,12 @@ def _sample(
     if return_unpruned_output:
         unpruned_ids = [input_ids[b].tolist() for b in range(batch_size)]
 
-    # Disable HF auto-compile: it triggers recompilation storms when input
-    # shapes change (different prompt lengths, post-prune re-processing).
-    # Instead, we explicitly compile for the decode phase below where the
-    # input shape is always (batch, 1).
+    # Use eager-mode forward for all steps.  torch.compile with
+    # mode="reduce-overhead" uses CUDAGraphs which record a separate graph
+    # for every distinct input shape.  During decode the KV-cache sequence
+    # length grows each step, producing a new shape every token — this
+    # causes excessive graph-recording overhead and no speedup.
     model_forward = model.__call__
-
-    # Cache the compiled decode forward on the model instance so it
-    # persists across generate() calls.  Without this, each call to
-    # _sample would re-invoke torch.compile and lose the compiled kernel.
-    _compiled_decode_forward = getattr(model, '_compiled_decode_forward', None)
-    if _compiled_decode_forward is None and torch.cuda.is_available():
-        try:
-            _compiled_decode_forward = torch.compile(
-                model.__call__,
-                mode="reduce-overhead",
-                fullgraph=False,
-            )
-            model._compiled_decode_forward = _compiled_decode_forward
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "torch.compile failed for decode forward; falling back to eager mode",
-                exc_info=True,
-            )
-            _compiled_decode_forward = None
 
     # Pre-allocate input_ids buffer to avoid O(n²) copies from torch.cat
     # on every token step.  input_ids becomes a view into this buffer.
@@ -492,17 +473,8 @@ def _sample(
     while GenerationMixin._has_unfinished_sequences(model, this_peer_finished, synced_gpus, device=input_ids.device):
         if prefill_consumed:
             model_inputs = _prepare_inputs_for_generation(model, input_ids, **model_kwargs)
-            # Use compiled forward for single-token decode steps (static
-            # shape).  Post-prune re-processing has variable-length input
-            # and must go through the uncompiled path to avoid recompilation.
-            _is_single_token = model_inputs["input_ids"].shape[1] == 1
-            _fwd = (
-                _compiled_decode_forward
-                if _is_single_token and _compiled_decode_forward is not None
-                else model_forward
-            )
             with GenerationMixin._optimize_model_for_decode(model):
-                outputs = _fwd(**model_inputs, return_dict=True)
+                outputs = model_forward(**model_inputs, return_dict=True)
         prefill_consumed = True
         model_kwargs = _update_model_kwargs_for_generation(
             model,
