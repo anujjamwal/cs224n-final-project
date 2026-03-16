@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Optional, Sequence, Tuple
 
 import torch
@@ -452,6 +453,10 @@ def _sample(
             )
             model._compiled_decode_forward = _compiled_decode_forward
         except Exception:
+            logging.getLogger(__name__).warning(
+                "torch.compile failed for decode forward; falling back to eager mode",
+                exc_info=True,
+            )
             _compiled_decode_forward = None
 
     # Pre-allocate input_ids buffer to avoid O(n²) copies from torch.cat
